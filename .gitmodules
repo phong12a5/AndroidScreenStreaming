@@ -1,0 +1,3 @@
+[submodule "/Users/phongdang/Workspace/Android/Project/AndroidScreenStreaming/ScreenStreaming/app/src/main/cpp/libdatachannel"]
+	path = /Users/phongdang/Workspace/Android/Project/AndroidScreenStreaming/ScreenStreaming/app/src/main/cpp/libdatachannel
+	url = https://github.com/paullouisageneau/libdatachannel.git

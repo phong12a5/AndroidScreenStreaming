@@ -12,8 +12,23 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+        ndkVersion '23.1.7779620'
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                arguments.add("-DANDROID_STL=c++_shared")
+                arguments.add("-DNO_WEBSOCKET=ON")
+                arguments.add("-DNO_MEDIA=ON")
+                arguments.add("-DNO_EXAMPLES=ON")
+                arguments.add("-DNO_TESTS=ON")
+                targets 'screenstreaming'
+            }
+        }
     }
 
     buildTypes {

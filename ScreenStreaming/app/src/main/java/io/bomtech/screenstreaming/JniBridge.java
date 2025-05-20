@@ -6,6 +6,8 @@ public class JniBridge {
 
     private static final String TAG = "JniBridge"; // Thêm TAG cho logging
     private static SignalingClient signalingClient; // Thêm tham chiếu đến SignalingClient
+    private static NativeCallback nativeCallback; // Thêm tham chiếu đến NativeCallback
+    private static volatile boolean isNativeDataChannelReady = false; // NEW: Flag for DC readiness
 
     // Load the native library
     static {
@@ -19,8 +21,10 @@ public class JniBridge {
     public static native void nativeOnOfferReceived(String sdp);
     public static native void nativeOnAnswerReceived(String sdp);
     public static native void nativeOnIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp);
-    public static native void nativeSendData(String message); // For sending data from Java to C++
-    public static native void nativeSendFrameData(byte[] frameData, int width, int height, int format); // New method for sending frame data
+    // public static native void nativeSendData(String message); // For sending data from Java to C++ - Consider removing if not used
+    // public static native void nativeSendFrameData(byte[] frameData, int width, int height, int format); // Old method for raw frames
+    public static native void nativeSendCodecConfigData(byte[] data, int size); // New method for codec config
+    public static native void nativeSendEncodedFrame(byte[] data, int size, boolean isKeyFrame, long presentationTimeUs); // New method for encoded frames
 
     // Callbacks from C++ to Java (to be called from native code)
     // These methods will be called by the C++ layer to send SDP offers, answers, or ICE candidates to the Java layer,
@@ -29,6 +33,11 @@ public class JniBridge {
     // Phương thức để thiết lập SignalingClient từ MainActivity hoặc nơi khác
     public static void setSignalingClient(SignalingClient client) {
         signalingClient = client;
+    }
+
+    // Phương thức để thiết lập NativeCallback từ MainActivity hoặc nơi khác
+    public static void setNativeCallback(NativeCallback callback) {
+        nativeCallback = callback;
     }
 
     public static void onLocalDescription(String type, String sdp) {
@@ -57,7 +66,34 @@ public class JniBridge {
     // Called from native code when the C++ DataChannel opens
     public static void onNativeDataChannelOpen() {
         Log.i(TAG, "Native DataChannel is now OPEN and ready to send data.");
+        isNativeDataChannelReady = true; // SET FLAG
         // TODO: Consider notifying ScreenCaptureService or setting a flag
         // that ScreenCaptureService can check before sending frames.
+        if (nativeCallback != null) {
+            nativeCallback.onNativeDataChannelOpen();
+        } else {
+            Log.w(TAG, "NativeCallback not set in JniBridge. Cannot notify DataChannel open.");
+        }
+    }
+
+    // NEW: Called from native code when the C++ DataChannel closes
+    public static void onNativeDataChannelClose() {
+        Log.i(TAG, "Native DataChannel is now CLOSED.");
+        isNativeDataChannelReady = false; // RESET FLAG
+        if (nativeCallback != null) {
+            nativeCallback.onNativeDataChannelClose();
+        } else {
+            Log.w(TAG, "NativeCallback not set in JniBridge. Cannot notify DataChannel close.");
+        }
+    }
+
+    // NEW: Method for ScreenCaptureService to check DC readiness
+    public static boolean isDataChannelReady() {
+        return isNativeDataChannelReady;
+    }
+
+    public interface NativeCallback {
+        public void onNativeDataChannelClose();
+        public void onNativeDataChannelOpen();
     }
 }

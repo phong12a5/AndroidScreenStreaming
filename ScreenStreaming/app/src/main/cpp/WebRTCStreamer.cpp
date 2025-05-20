@@ -9,6 +9,10 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// NEW: Message type prefixes (must match JavaScript)
+const uint8_t MSG_TYPE_CODEC_CONFIG_RAW = 0x01;
+const uint8_t MSG_TYPE_VIDEO_FRAME_RAW = 0x02;
+
 // Global WebRTCStreamer instance and JNIEnv pointer
 static std::shared_ptr<WebRTCStreamer> g_webRTCStreamer;
 static JavaVM* g_javaVM = nullptr;
@@ -142,79 +146,87 @@ void WebRTCStreamer::init() {
         }
         jstring midStr = stringToJstring(env, candidate.mid());
         jstring candidateStr = stringToJstring(env, std::string(candidate));
-        // sdpMLineIndex is part of the candidate string usually, or can be passed if available directly
-        // For libdatachannel, the candidate string itself is usually sufficient.
-        // If sdpMLineIndex is explicitly needed and not easily parsed, this might need adjustment.
-        // The structure of rtc::Candidate might provide this, check libdatachannel docs.
-        // For simplicity, let's assume it's not directly used or embedded in a way that needs separate extraction here.
         env->CallStaticVoidMethod(cls, mid, midStr, 0 /* sdpMLineIndex placeholder */, candidateStr);
         env->DeleteLocalRef(cls);
         env->DeleteLocalRef(midStr);
         env->DeleteLocalRef(candidateStr);
     });
 
-    dc = pc->createDataChannel("screenStream");
-    LOGI("DataChannel 'screenStream' created");
+    // dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
+    // LOGI("DataChannel 'screenStream' created");
 
-    dc->onOpen([this]() {
-        LOGI("DataChannel opened");
-        isDataChannelOpen = true; // Set the flag to true
-        JNIEnv* env = getJNIEnv();
-        if (!env || !g_jniBridgeInstance) {
-            LOGE("JNIEnv or JniBridge instance is null in dc->onOpen, cannot notify Java");
-            return;
-        }
-        jclass cls = env->GetObjectClass(g_jniBridgeInstance);
-        // It's better to get the class reference once, e.g., in JNI_OnLoad or nativeInit, and cache it if frequently used.
-        // For simplicity here, we find it each time.
-        // jclass jniBridgeClass_local = env->FindClass("io/bomtech/screenstreaming/JniBridge"); // This would be for static context
-        // if (jniBridgeClass_local == nullptr) {
-        //     LOGE("Failed to find JniBridge class in dc->onOpen");
-        //     return;
-        // }
-        jmethodID mid = env->GetStaticMethodID(cls, "onNativeDataChannelOpen", "()V");
-        if (mid == nullptr) {
-            LOGE("Failed to find onNativeDataChannelOpen method");
-            env->DeleteLocalRef(cls);
-            // env->DeleteLocalRef(jniBridgeClass_local); // if used
-            return;
-        }
-        env->CallStaticVoidMethod(cls, mid);
-        LOGI("Called JniBridge.onNativeDataChannelOpen()");
-        env->DeleteLocalRef(cls);
-        // env->DeleteLocalRef(jniBridgeClass_local); // if used
-    });
+    // NEW: Set up handler for incoming DataChannel
+    pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> incomingDc) {
+        LOGI("DataChannel received: %s", incomingDc->label().c_str());
+        this->dc = incomingDc; // Assign the incoming DataChannel
 
-    dc->onClosed([this]() {
-        LOGI("DataChannel closed");
-        isDataChannelOpen = false; // Set the flag to false
-        // Optionally notify Java
-    });
-
-    dc->onMessage([this](auto data) { 
-        if (std::holds_alternative<std::string>(data)) {
-            std::string message = std::get<std::string>(data);
-            LOGI("DataChannel message received: %s", message.c_str());
-            onDataChannelMessage(message); // Forward to existing handler
+        this->dc->onOpen([this]() {
+            LOGI("DataChannel opened by remote");
+            isDataChannelOpen = true;
             JNIEnv* env = getJNIEnv();
             if (!env || !g_jniBridgeInstance) {
-                 LOGE("JNIEnv or JniBridge instance is null in onMessage");
+                LOGE("JNIEnv or JniBridge instance is null in dc->onOpen (incoming), cannot notify Java");
                 return;
             }
             jclass cls = env->GetObjectClass(g_jniBridgeInstance);
-            jmethodID mid = env->GetStaticMethodID(cls, "onDataChannelMessage", "(Ljava/lang/String;)V");
+            jmethodID mid = env->GetStaticMethodID(cls, "onNativeDataChannelOpen", "()V");
             if (mid == nullptr) {
-                LOGE("Failed to find onDataChannelMessage method");
+                LOGE("Failed to find onNativeDataChannelOpen method for incoming DC");
                 env->DeleteLocalRef(cls);
                 return;
             }
-            jstring messageStr = stringToJstring(env, message);
-            env->CallStaticVoidMethod(cls, mid, messageStr);
+            env->CallStaticVoidMethod(cls, mid);
+            LOGI("Called JniBridge.onNativeDataChannelOpen() for incoming DC");
             env->DeleteLocalRef(cls);
-            env->DeleteLocalRef(messageStr);
-        } else {
-            LOGI("DataChannel binary message received (not handled)");
-        }
+        });
+
+        this->dc->onClosed([this]() {
+            LOGI("DataChannel closed by remote");
+            isDataChannelOpen = false;
+            // Optionally notify Java
+            JNIEnv* env = getJNIEnv();
+            if (!env || !g_jniBridgeInstance) {
+                LOGE("JNIEnv or JniBridge instance is null in dc->onClosed (incoming), cannot notify Java");
+                return;
+            }
+            jclass cls = env->GetObjectClass(g_jniBridgeInstance);
+            jmethodID mid = env->GetStaticMethodID(cls, "onNativeDataChannelClose", "()V");
+            if (mid == nullptr) {
+                LOGE("Failed to find onNativeDataChannelClose method for incoming DC");
+                env->DeleteLocalRef(cls);
+                return;
+            }
+            env->CallStaticVoidMethod(cls, mid);
+            LOGI("Called JniBridge.onNativeDataChannelClose() for incoming DC");
+            env->DeleteLocalRef(cls);
+        });
+
+        this->dc->onMessage([this](auto data) {
+            if (std::holds_alternative<std::string>(data)) {
+                std::string message = std::get<std::string>(data);
+                LOGI("DataChannel message received from remote: %s", message.c_str());
+                // onDataChannelMessage(message); // Already handled by JNI callback below
+                JNIEnv* env = getJNIEnv();
+                if (!env || !g_jniBridgeInstance) {
+                    LOGE("JNIEnv or JniBridge instance is null in onMessage (incoming)");
+                    return;
+                }
+                jclass cls = env->GetObjectClass(g_jniBridgeInstance);
+                jmethodID mid = env->GetStaticMethodID(cls, "onDataChannelMessage", "(Ljava/lang/String;)V");
+                if (mid == nullptr) {
+                    LOGE("Failed to find onDataChannelMessage method for incoming DC");
+                    env->DeleteLocalRef(cls);
+                    return;
+                }
+                jstring messageStr = stringToJstring(env, message);
+                env->CallStaticVoidMethod(cls, mid, messageStr);
+                env->DeleteLocalRef(cls);
+                env->DeleteLocalRef(messageStr);
+            } else {
+                // LOGI("DataChannel binary message received (not handled by string path)");
+                // Binary data is handled by sendCodecConfigData and sendEncodedFrame
+            }
+        });
     });
 }
 
@@ -299,53 +311,84 @@ void WebRTCStreamer::handleIceCandidate(const std::string& sdpMid, int sdpMLineI
     pc->addRemoteCandidate(candidate);
 }
 
-void WebRTCStreamer::sendFrameData(const uint8_t* frameData, int width, int height, int format) {
-    if (!dc || !isDataChannelOpen) { // Check the flag here
-        LOGE("DataChannel is not open, cannot send frame data. dc: %p, isOpen: %d", dc.get(), isDataChannelOpen);
+void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
+    if (!dc || !isDataChannelOpen) {
+        LOGE("DataChannel is not open, cannot send codec config data. dc: %p, isOpen: %d", dc.get(), isDataChannelOpen);
         return;
     }
-
-    // Assuming format is RGBA for now. You might need to handle different formats (e.g., I420)
-    // and potentially convert them if libdatachannel expects a specific format or if you want to compress.
-    // For simplicity, sending raw RGBA data.
-    // The size of the data is width * height * 4 (for RGBA)
-    // libdatachannel's send method takes rtc::binary (which is std::vector<std::byte>)
-    // or std::string. If sending binary, convert frameData to std::vector<std::byte>.
-
-    // Example: Sending as a binary message
-    // int frameSize = width * height * 4; // Assuming RGBA
-    // rtc::binary binaryData(frameSize);
-    // memcpy(binaryData.data(), frameData, frameSize);
-    // dc->send(binaryData);
-
-    // For now, let's log that we would send data. Actual sending might require more setup
-    // depending on how you want to serialize/format the frame data.
-    // If you send it as a string, it might involve base64 encoding or similar, which is inefficient.
-    // Prefer binary messages for raw pixel data.
-
-    LOGI("Attempting to send frame data: %dx%d, format: %d", width, height, format);
-
-    // Placeholder: Convert to std::vector<std::byte> and send
-    // This is a simplified example. You'll need to manage the data lifetime and ensure
-    // the format is what the receiver expects.
-    size_t dataSize = static_cast<size_t>(width) * height * 4; // Assuming RGBA (4 bytes per pixel)
-    if (dataSize == 0) {
-        LOGE("Frame data size is zero, not sending.");
+    if (size == 0) {
+        LOGE("Codec config data size is zero, not sending.");
         return;
     }
+    LOGI("Attempting to send codec config data, original size: %d", size);
 
-    rtc::binary dataToSend(dataSize);
-    memcpy(dataToSend.data(), frameData, dataSize);
+    // MODIFIED: Add 1-byte prefix for message type and cast to std::byte
+    int prefixedSize = size + 1;
+    rtc::binary prefixedData(prefixedSize);
+    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_CODEC_CONFIG_RAW); // Cast to std::byte
+    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + 1, data, size); // Ensure correct pointer type for memcpy
 
     try {
-        dc->send(dataToSend);
-        LOGI("Frame data sent successfully via DataChannel.");
+        dc->send(prefixedData);
+        LOGI("Codec config data sent successfully via DataChannel (prefixed), total size: %d", prefixedSize);
     } catch (const std::exception& e) {
-        LOGE("Exception while sending frame data: %s", e.what());
+        LOGE("Exception while sending codec config data: %s", e.what());
     } catch (...) {
-        LOGE("Unknown exception while sending frame data.");
+        LOGE("Unknown exception while sending codec config data.");
     }
 }
+
+void WebRTCStreamer::sendEncodedFrame(const uint8_t* data, int size, bool isKeyFrame, int64_t pts) {
+    if (!dc || !isDataChannelOpen) {
+        LOGE("DataChannel is not open, cannot send encoded frame. dc: %p, isOpen: %d", dc.get(), isDataChannelOpen);
+        return;
+    }
+    if (size == 0) {
+        LOGE("Encoded frame data size is zero, not sending.");
+        return;
+    }
+    // LOGI("Attempting to send encoded frame, original size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
+
+    // MODIFIED: Add 1-byte for message type, 1-byte for isKeyFrame, 8-bytes for PTS
+    int headerSize = 1 + 1 + 8; // type + isKeyFrame + PTS
+    int prefixedSize = size + headerSize;
+    rtc::binary prefixedData(prefixedSize);
+
+    // Byte 0: Message Type
+    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_VIDEO_FRAME_RAW);
+
+    // Byte 1: isKeyFrame
+    prefixedData[1] = static_cast<std::byte>(isKeyFrame ? 0x01 : 0x00);
+
+    // Bytes 2-9: PTS (Presentation Timestamp) in network byte order (big-endian)
+    uint64_t pts_network_order = htobe64(static_cast<uint64_t>(pts)); // Ensure pts is uint64_t for htobe64 if available, or manual conversion
+    // Manual big-endian conversion for pts (int64_t to 8 bytes)
+    // htobe64 might not be available on all Android NDK versions/toolchains without extra includes/config.
+    // Let's do it manually to be safe.
+    uint8_t* pts_ptr = reinterpret_cast<uint8_t*>(&pts_network_order); // Use a temp variable for network order
+    // Manual conversion to big-endian:
+    prefixedData[2] = static_cast<std::byte>((pts >> 56) & 0xFF);
+    prefixedData[3] = static_cast<std::byte>((pts >> 48) & 0xFF);
+    prefixedData[4] = static_cast<std::byte>((pts >> 40) & 0xFF);
+    prefixedData[5] = static_cast<std::byte>((pts >> 32) & 0xFF);
+    prefixedData[6] = static_cast<std::byte>((pts >> 24) & 0xFF);
+    prefixedData[7] = static_cast<std::byte>((pts >> 16) & 0xFF);
+    prefixedData[8] = static_cast<std::byte>((pts >> 8) & 0xFF);
+    prefixedData[9] = static_cast<std::byte>(pts & 0xFF);
+
+    // Remaining bytes: Frame Data
+    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + headerSize, data, size);
+
+    try {
+        dc->send(prefixedData);
+        // LOGI("Encoded frame sent successfully via DataChannel (prefixed), total size: %d", prefixedSize); // This can be very verbose
+    } catch (const std::exception& e) {
+        LOGE("Exception while sending encoded frame: %s", e.what());
+    } catch (...) {
+        LOGE("Unknown exception while sending encoded frame.");
+    }
+}
+
 
 // JNI Bridge Implementations
 extern "C" {
@@ -428,19 +471,36 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeSendData(JNIEnv *env, jclass cla
 }
 
 JNIEXPORT void JNICALL
-Java_io_bomtech_screenstreaming_JniBridge_nativeSendFrameData(
-        JNIEnv *env, jclass clazz, jbyteArray frameData, jint width, jint height, jint format) {
+Java_io_bomtech_screenstreaming_JniBridge_nativeSendCodecConfigData(
+        JNIEnv *env, jclass clazz, jbyteArray dataArray, jint size) {
     if (!g_webRTCStreamer) {
-        LOGE("WebRTCStreamer not initialized in nativeSendFrameData");
+        LOGE("WebRTCStreamer not initialized in nativeSendCodecConfigData");
         return;
     }
-    jbyte* data = env->GetByteArrayElements(frameData, nullptr);
+    jbyte* data = env->GetByteArrayElements(dataArray, nullptr);
     if (data == nullptr) {
-        LOGE("Failed to get byte array elements from frameData");
+        LOGE("Failed to get byte array elements from dataArray in nativeSendCodecConfigData");
         return;
     }
-    g_webRTCStreamer->sendFrameData(reinterpret_cast<const uint8_t*>(data), width, height, format);
-    env->ReleaseByteArrayElements(frameData, data, JNI_ABORT); // Use JNI_ABORT if data is not modified
+    g_webRTCStreamer->sendCodecConfigData(reinterpret_cast<const uint8_t*>(data), size);
+    env->ReleaseByteArrayElements(dataArray, data, JNI_ABORT);
 }
+
+JNIEXPORT void JNICALL
+Java_io_bomtech_screenstreaming_JniBridge_nativeSendEncodedFrame(
+        JNIEnv *env, jclass clazz, jbyteArray dataArray, jint size, jboolean isKeyFrame, jlong presentationTimeUs) {
+    if (!g_webRTCStreamer) {
+        // LOGE("WebRTCStreamer not initialized in nativeSendEncodedFrame"); // Can be verbose
+        return;
+    }
+    jbyte* data = env->GetByteArrayElements(dataArray, nullptr);
+    if (data == nullptr) {
+        // LOGE("Failed to get byte array elements from dataArray in nativeSendEncodedFrame"); // Can be verbose
+        return;
+    }
+    g_webRTCStreamer->sendEncodedFrame(reinterpret_cast<const uint8_t*>(data), size, isKeyFrame, presentationTimeUs);
+    env->ReleaseByteArrayElements(dataArray, data, JNI_ABORT);
+}
+
 
 } // extern "C"

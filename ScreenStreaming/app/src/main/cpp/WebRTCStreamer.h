@@ -19,7 +19,8 @@ public:
     void handleOffer(const std::string& sdp);
     void handleAnswer(const std::string& sdp);
     void handleIceCandidate(const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp);
-    void sendFrameData(const uint8_t* frameData, int width, int height, int format);
+    void sendCodecConfigData(const uint8_t* data, int size);
+    void sendEncodedFrame(const uint8_t* data, int size, bool isKeyFrame, int64_t pts);
 
 private:
     std::shared_ptr<rtc::PeerConnection> pc;

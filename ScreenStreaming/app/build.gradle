@@ -26,7 +26,7 @@ android {
                 arguments.add("-DNO_MEDIA=ON")
                 arguments.add("-DNO_EXAMPLES=ON")
                 arguments.add("-DNO_TESTS=ON")
-                targets 'screenstreaming'
+                targets 'datachannel-static', 'screenstreaming'
             }
         }
     }

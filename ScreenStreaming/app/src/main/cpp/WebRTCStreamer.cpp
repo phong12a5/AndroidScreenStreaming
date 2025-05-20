@@ -97,11 +97,11 @@ void WebRTCStreamer::init() {
     pc = std::make_shared<rtc::PeerConnection>(config);
 
     pc->onStateChange([](rtc::PeerConnection::State state) {
-        LOGI("PeerConnection State: %s", rtc::toString(state).c_str());
+//        LOGI("PeerConnection State: %s", rtc::toString(state).c_str());
     });
 
     pc->onGatheringStateChange([](rtc::PeerConnection::GatheringState state) {
-        LOGI("PeerConnection Gathering State: %s", rtc::toString(state).c_str());
+//        LOGI("PeerConnection Gathering State: %s", rtc::toString(state).c_str());
     });
 
     pc->onLocalDescription([this](rtc::Description description) {

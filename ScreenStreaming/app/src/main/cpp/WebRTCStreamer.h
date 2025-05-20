@@ -17,7 +17,9 @@ public:
     void stopStreaming();
     void onDataChannelMessage(std::string message);
     void sendDataChannelMessage(std::string message);
-    // Add other necessary methods for WebRTC signaling, media handling, etc.
+    void handleOffer(const std::string& sdp);
+    void handleAnswer(const std::string& sdp);
+    void handleIceCandidate(const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp);
 
 private:
     std::shared_ptr<rtc::PeerConnection> pc;

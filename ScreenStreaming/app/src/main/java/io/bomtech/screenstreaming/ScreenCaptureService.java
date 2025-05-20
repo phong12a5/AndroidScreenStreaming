@@ -104,37 +104,35 @@ public class ScreenCaptureService extends Service {
         imageReaderHandler = new Handler(imageReaderThread.getLooper());
 
         imageReader.setOnImageAvailableListener(reader -> {
-            // This is where you get screen frames
-            // For WebRTC, you would convert this Image to a suitable format (e.g., I420) 
-            // and send it via the DataChannel or a VideoTrack.
-            // For sending raw frames via DataChannel (simplest for libdatachannel without full WebRTC stack):
-            // 1. Get Image from reader.acquireLatestImage()
-            // 2. Get ByteBuffer from image.getPlanes()[0].getBuffer()
-            // 3. Create a byte array from ByteBuffer
-            // 4. Send this byte array (possibly with metadata like width, height, format) via JniBridge.nativeSendData()
-            // This part needs careful implementation for performance and data handling.
-            // Example: 
-            /*
-            try (Image image = reader.acquireLatestImage()) {
+            android.media.Image image = null;
+            try {
+                image = reader.acquireLatestImage();
                 if (image != null) {
-                    Image.Plane[] planes = image.getPlanes();
-                    ByteBuffer buffer = planes[0].getBuffer();
+                    android.media.Image.Plane[] planes = image.getPlanes();
+                    java.nio.ByteBuffer buffer = planes[0].getBuffer();
                     byte[] data = new byte[buffer.remaining()];
                     buffer.get(data);
-                    // TODO: Send 'data' (and width/height/format) to native layer via JniBridge
-                    // JniBridge.nativeSendFrameData(data, image.getWidth(), image.getHeight(), image.getFormat());
-                    // This nativeSendFrameData would then use dc->send(rtc::binary(data.begin(), data.end()));
-                    Log.d(TAG, "Frame captured, size: " + data.length);
+
+                    // Assuming RGBA_8888, which is 4 bytes per pixel.
+                    // The format integer can be mapped to standard Android PixelFormat values.
+                    // For simplicity, we can pass a custom enum or integer if WebRTCStreamer.cpp handles it.
+                    // PixelFormat.RGBA_8888 is 1.
+                    JniBridge.nativeSendFrameData(data, image.getWidth(), image.getHeight(), PixelFormat.RGBA_8888); // image.getWidth() and image.getHeight() will be captureWidth and captureHeight
+                    Log.d(TAG, "Frame captured and sent to native layer. Size: " + data.length +
+                                 ", W: " + image.getWidth() + ", H: " + image.getHeight());
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Error processing image: " + e.getMessage());
+                Log.e(TAG, "Error processing image: " + e.getMessage(), e);
+            } finally {
+                if (image != null) {
+                    image.close();
+                }
             }
-            */
         }, imageReaderHandler);
 
         // Create VirtualDisplay
         virtualDisplay = mediaProjection.createVirtualDisplay("ScreenCapture",
-                screenWidth, screenHeight, screenDensity,
+                captureWidth, captureHeight, screenDensity,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(), null, null);
         Log.d(TAG, "VirtualDisplay created.");

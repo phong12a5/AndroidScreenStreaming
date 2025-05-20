@@ -1,4 +1,3 @@
-
 #ifndef WEBRTCSTREAMER_H
 #define WEBRTCSTREAMER_H
 
@@ -20,10 +19,12 @@ public:
     void handleOffer(const std::string& sdp);
     void handleAnswer(const std::string& sdp);
     void handleIceCandidate(const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp);
+    void sendFrameData(const uint8_t* frameData, int width, int height, int format);
 
 private:
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
+    bool isDataChannelOpen = false; // Add this flag
     // Add other WebRTC related members
 };
 

@@ -1,4 +1,5 @@
 #include "WebRTCStreamer.h"
+#include "rtc/rtp.hpp"
 #include <rtc/rtc.hpp> 
 #include <iostream>
 #include <jni.h> // Required for JNI calls
@@ -285,9 +286,15 @@ void WebRTCStreamer::handleOffer(const std::string& sdp) {
     if (!pc) {
         init();
     }
-    rtc::Description offer(sdp, "offer");
-    pc->setRemoteDescription(offer);
+    const rtc::SSRC ssrc = 42;
+    rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
+    media.addH264Codec(96); // Must match the payload type of the external h264 RTP stream
+    media.addSSRC(ssrc, "video-send");
+    track = pc->addTrack(media);
     pc->setLocalDescription(); // Create answer
+//
+//    rtc::Description offer(sdp, "offer");
+//    pc->setRemoteDescription(offer);
 }
 
 void WebRTCStreamer::handleAnswer(const std::string& sdp) {
@@ -323,19 +330,19 @@ void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
     LOGI("Attempting to send codec config data, original size: %d", size);
 
     // MODIFIED: Add 1-byte prefix for message type and cast to std::byte
-    int prefixedSize = size + 1;
-    rtc::binary prefixedData(prefixedSize);
-    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_CODEC_CONFIG_RAW); // Cast to std::byte
-    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + 1, data, size); // Ensure correct pointer type for memcpy
-
-    try {
-        dc->send(prefixedData);
-        LOGI("Codec config data sent successfully via DataChannel (prefixed), total size: %d", prefixedSize);
-    } catch (const std::exception& e) {
-        LOGE("Exception while sending codec config data: %s", e.what());
-    } catch (...) {
-        LOGE("Unknown exception while sending codec config data.");
-    }
+//    int prefixedSize = size + 1;
+//    rtc::binary prefixedData(prefixedSize);
+//    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_CODEC_CONFIG_RAW); // Cast to std::byte
+//    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + 1, data, size); // Ensure correct pointer type for memcpy
+//
+//    try {
+//        dc->send(prefixedData);
+//        LOGI("Codec config data sent successfully via DataChannel (prefixed), total size: %d", prefixedSize);
+//    } catch (const std::exception& e) {
+//        LOGE("Exception while sending codec config data: %s", e.what());
+//    } catch (...) {
+//        LOGE("Unknown exception while sending codec config data.");
+//    }
 }
 
 void WebRTCStreamer::sendEncodedFrame(const uint8_t* data, int size, bool isKeyFrame, int64_t pts) {
@@ -349,38 +356,14 @@ void WebRTCStreamer::sendEncodedFrame(const uint8_t* data, int size, bool isKeyF
     }
     // LOGI("Attempting to send encoded frame, original size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
 
-    // MODIFIED: Add 1-byte for message type, 1-byte for isKeyFrame, 8-bytes for PTS
-    int headerSize = 1 + 1 + 8; // type + isKeyFrame + PTS
-    int prefixedSize = size + headerSize;
+    // MODIFIED: Add 1-byte prefix for message type and cast to std::byte
+    int prefixedSize = size;
     rtc::binary prefixedData(prefixedSize);
-
-    // Byte 0: Message Type
-    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_VIDEO_FRAME_RAW);
-
-    // Byte 1: isKeyFrame
-    prefixedData[1] = static_cast<std::byte>(isKeyFrame ? 0x01 : 0x00);
-
-    // Bytes 2-9: PTS (Presentation Timestamp) in network byte order (big-endian)
-    uint64_t pts_network_order = htobe64(static_cast<uint64_t>(pts)); // Ensure pts is uint64_t for htobe64 if available, or manual conversion
-    // Manual big-endian conversion for pts (int64_t to 8 bytes)
-    // htobe64 might not be available on all Android NDK versions/toolchains without extra includes/config.
-    // Let's do it manually to be safe.
-    uint8_t* pts_ptr = reinterpret_cast<uint8_t*>(&pts_network_order); // Use a temp variable for network order
-    // Manual conversion to big-endian:
-    prefixedData[2] = static_cast<std::byte>((pts >> 56) & 0xFF);
-    prefixedData[3] = static_cast<std::byte>((pts >> 48) & 0xFF);
-    prefixedData[4] = static_cast<std::byte>((pts >> 40) & 0xFF);
-    prefixedData[5] = static_cast<std::byte>((pts >> 32) & 0xFF);
-    prefixedData[6] = static_cast<std::byte>((pts >> 24) & 0xFF);
-    prefixedData[7] = static_cast<std::byte>((pts >> 16) & 0xFF);
-    prefixedData[8] = static_cast<std::byte>((pts >> 8) & 0xFF);
-    prefixedData[9] = static_cast<std::byte>(pts & 0xFF);
-
-    // Remaining bytes: Frame Data
-    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + headerSize, data, size);
+//    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_VIDEO_FRAME_RAW); // Cast to std::byte
+    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) , data, size); // Ensure correct pointer type for memcpy
 
     try {
-        dc->send(prefixedData);
+        track->send(prefixedData);
         // LOGI("Encoded frame sent successfully via DataChannel (prefixed), total size: %d", prefixedSize); // This can be very verbose
     } catch (const std::exception& e) {
         LOGE("Exception while sending encoded frame: %s", e.what());

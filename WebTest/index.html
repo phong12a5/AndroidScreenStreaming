@@ -1,23 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebRTC Screen Share Test</title>
-    <link rel="stylesheet" href="style.css">
+    <title>WebRTC Screen Receiver</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        #remoteVideo {
+            width: 80%;
+            max-width: 640px;
+            border: 1px solid black;
+            background-color: #333;
+        }
+        #status { margin-top: 10px; }
+        .hidden { display: none; }
+    </style>
 </head>
 <body>
-    <h1>WebRTC Screen Share Test</h1>
-    <div class="container">
-        <div class="video-container">
-            <h2>Remote Screen</h2>
-            <video id="remoteVideo" autoplay playsinline></video>
-        </div>
-        <div class="controls">
-            <button id="connectButton">Connect</button>
-            <p id="status">Status: Idle</p>
-        </div>
-    </div>
-    <script src="script.js"></script>
+    <h1>WebRTC Screen Receiver</h1>
+
+    <video id="remoteVideo" autoplay playsinline controls></video>
+    <div id="status">Status: Idle</div>
+
+    <button id="startButton" onclick="startSession()">Connect to Stream</button>
+    <button id="stopButton" onclick="stopSession()" class="hidden">Disconnect</button>
+
+    <script src="main.js"></script>
 </body>
 </html>

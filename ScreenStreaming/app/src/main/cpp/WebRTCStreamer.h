@@ -25,6 +25,7 @@ public:
 private:
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
+    std::shared_ptr<rtc::Track> track;
     bool isDataChannelOpen = false; // Add this flag
     // Add other WebRTC related members
 };

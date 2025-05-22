@@ -168,11 +168,11 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     @Override
     public void onIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp) {
         Log.d(TAG, "ICE candidate received: mid=" + sdpMid + ", index=" + sdpMLineIndex + ", sdp=" + sdp);
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+//        try {
+//            Thread.sleep(1000);
+//        } catch (InterruptedException e) {
+//            throw new RuntimeException(e);
+//        }
         JniBridge.nativeOnIceCandidateReceived(sdpMid, sdpMLineIndex, sdp);
     }
 

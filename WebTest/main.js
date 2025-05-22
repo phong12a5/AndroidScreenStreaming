@@ -117,24 +117,32 @@ function startSession() {
 function createPeerConnection() {
     updateStatus("Creating PeerConnection...");
     pc = new RTCPeerConnection(iceConfiguration);
+    console.log("Initial pc.iceGatheringState:", pc.iceGatheringState); // Log trạng thái ban đầu
 
     pc.onicecandidate = (event) => {
         if (event.candidate) {
-            updateStatus("Generated ICE candidate. Sending...");
+            updateStatus("Generated ICE candidate. Sending...: "+ event.candidate); // Sẽ hiển thị [object RTCIceCandidate]
             // Gửi candidate đến peer kia thông qua signaling server
-            // Message cần có cấu trúc mà Android app (libdatachannel) hiểu được
-            // Ví dụ: { type: 'candidate', candidate: event.candidate.toJSON() }
-            // libdatachannel có thể mong đợi mid, sdpMLineIndex, sdp
             const candidateMessage = {
                 type: 'candidate',
-                candidate: {
-                    sdpMid: event.candidate.sdpMid,
-                    sdpMLineIndex: event.candidate.sdpMLineIndex,
-                    candidate: event.candidate.candidate
-                }
+                // Gửi toàn bộ đối tượng event.candidate. RTCIceCandidate.toJSON() sẽ được gọi khi JSON.stringify.
+                // Android (libdatachannel) cần parse JSON này để lấy các trường sdpMid, sdpMLineIndex, candidate (string).
+                candidate: event.candidate 
             };
             signalingSocket.send(JSON.stringify(candidateMessage));
+        } else {
+            // Quan trọng: Điều này báo hiệu rằng việc thu thập ICE candidate đã hoàn tất.
+            console.log("All local ICE candidates have been gathered.");
+            updateStatus("All ICE candidates gathered.");
+            // pc.iceGatheringState sẽ chuyển sang 'complete' và icegatheringstatechange sẽ được kích hoạt.
         }
+       console.log("Initial pc.iceGatheringState:", pc.iceGatheringState); // Log trạng thái ban đầu
+ };
+
+    pc.icegatheringstatechange = () => {
+        // Log trực tiếp và rõ ràng hơn
+        console.log(`EVENT: icegatheringstatechange fired. New state: ${pc.iceGatheringState}`); 
+        updateStatus(`ICE gathering state: ${pc.iceGatheringState}`);
     };
 
     pc.oniceconnectionstatechange = () => {

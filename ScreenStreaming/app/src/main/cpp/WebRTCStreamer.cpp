@@ -162,6 +162,9 @@ void WebRTCStreamer::init() {
     videoDesc.addSSRC(kVideoSSRC, "video-stream", "stream1", "video-stream");
     videoDesc.addH264Codec(96);
     track = pc->addTrack(videoDesc);
+    track->onOpen([this]() {
+        LOGI("Track opened");
+    });
 
 
      dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)

@@ -1,28 +1,336 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC Screen Receiver</title>
+    <title>Simple WebRTC Receiver Client with WebSocket Signaling</title>
     <style>
-        body { font-family: sans-serif; margin: 20px; }
-        #remoteVideo {
-            width: 80%;
-            max-width: 640px;
-            border: 1px solid black;
-            background-color: #333;
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
         }
-        #status { margin-top: 10px; }
-        .hidden { display: none; }
+        .video-container {
+            display: flex;
+            justify-content: center; /* Canh giữa video nếu chỉ có 1 */
+            margin-bottom: 20px;
+        }
+        #remoteVideo { /* Chỉ hiển thị remote */
+            width: 90%; /* Chiếm gần hết chiều rộng */
+            max-width: 800px; /* Giới hạn kích thước tối đa */
+            border: 1px solid #ccc;
+            background-color: #000;
+        }
+        .controls {
+            margin-bottom: 20px;
+            text-align: center; /* Canh giữa nút điều khiển */
+        }
+        button {
+            padding: 10px 15px;
+            margin-right: 10px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+         button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-bottom: 10px;
+            font-weight: bold;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
-    <h1>WebRTC Screen Receiver</h1>
 
-    <video id="remoteVideo" autoplay playsinline controls></video>
-    <div id="status">Status: Idle</div>
+    <h1>Simple WebRTC Receiver Client</h1>
 
-    <button id="startButton" onclick="startSession()">Connect to Stream</button>
-    <button id="stopButton" onclick="stopSession()" class="hidden">Disconnect</button>
+    <div class="status">
+        Signaling Server Status: <span id="signalingStatus">Connecting...</span>
+    </div>
 
-    <script src="main.js"></script>
+    <div class="video-container">
+        <div>
+            <h2>Remote Video</h2>
+            <video id="remoteVideo" autoplay></video>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="requestCallButton" disabled>Request Remote Stream</button>
+        <button id="hangupButton" disabled>Hang Up</button>
+    </div>
+
+    <script>
+        const remoteVideo = document.getElementById('remoteVideo');
+        const requestCallButton = document.getElementById('requestCallButton'); // Đổi tên nút
+        const hangupButton = document.getElementById('hangupButton');
+        const signalingStatusSpan = document.getElementById('signalingStatus');
+
+        const signalingServerUrl = 'ws://localhost:8080'; // Địa chỉ signaling server
+        let webSocket;
+
+        let peerConnection; // Peer connection sẽ được tạo khi nhận Offer
+
+
+        // Cấu hình STUN server
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+                // Bạn có thể thêm các STUN/TURN server khác ở đây
+            ]
+        };
+
+        // --- WebSocket Setup ---
+        function connectWebSocket() {
+            webSocket = new WebSocket(signalingServerUrl);
+
+            webSocket.onopen = () => {
+                console.log('WebSocket connected to signaling server');
+                signalingStatusSpan.textContent = 'Connected';
+                signalingStatusSpan.style.color = 'green';
+                // Kích hoạt nút Request Call khi kết nối server thành công
+                requestCallButton.disabled = false;
+
+                 // Nếu server có logic báo user tham gia, có thể kích hoạt nút call dựa vào đó
+                 // sendMessage({ type: 'ready' }); // Ví dụ: báo cho server biết client đã sẵn sàng
+            };
+
+            webSocket.onmessage = async (event) => {
+                console.log('WebSocket message received:', event.data);
+                const message = JSON.parse(event.data);
+
+                // Nếu nhận được Offer, tạo Peer Connection nếu chưa có và xử lý Offer
+                if (message.type === 'offer') {
+                    console.log('Received offer');
+                     if (!peerConnection) {
+                         console.log('Peer connection not created yet, creating on receiving offer...');
+                         createPeerConnection(); // Tạo PC khi nhận Offer
+                         hangupButton.disabled = false; // Bật nút ngắt kết nối
+                     }
+
+                    try {
+                         await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
+                         console.log('Remote description (Offer) set.');
+                         const answer = await peerConnection.createAnswer();
+                         await peerConnection.setLocalDescription(answer);
+                         sendMessage(answer); // Gửi Answer qua WebSocket
+                         console.log('Answer created and sent via WebSocket: ' + answer);
+                     } catch(e) {
+                         console.error('Error setting remote description or creating answer:', e);
+                     }
+
+                } else if (message.type === 'candidate') {
+                     if (message.candidate && peerConnection) {
+                         console.log('Received ICE candidate');
+                         try {
+                             await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                         } catch (e) {
+                             console.error('Error adding received ICE candidate:', e);
+                         }
+                     } else {
+                         console.log('Received null ICE candidate or peerConnection not ready.');
+                     }
+                } else if (message.type === 'hangup') {
+                    console.log('Received hangup message from remote.');
+                    hangup(); // Ngắt kết nối khi remote hangup
+                }
+                 // Bạn có thể thêm các loại tin nhắn khác từ server ở đây (ví dụ: call accepted, call rejected, etc.)
+                 else {
+                    console.warn('Unknown message type:', message.type);
+                 }
+            };
+
+            webSocket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                signalingStatusSpan.textContent = 'Error';
+                signalingStatusSpan.style.color = 'red';
+            };
+
+            webSocket.onclose = (event) => {
+                console.log('WebSocket closed:', event.code, event.reason);
+                signalingStatusSpan.textContent = 'Closed';
+                signalingStatusSpan.style.color = 'orange';
+                requestCallButton.disabled = true;
+                hangupButton.disabled = true;
+                 hangup(); // Clean up WebRTC connection on WS close
+                // Có thể thử reconnect sau một khoảng thời gian ở đây
+            };
+        }
+
+        function sendMessage(message) {
+            if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+                webSocket.send(JSON.stringify(message));
+                 console.log('WebSocket message sent:', message);
+            } else {
+                console.warn('WebSocket not connected. Message not sent:', message);
+            }
+        }
+
+
+        // --- Event Listeners ---
+        requestCallButton.addEventListener('click', sendRequest); // Gửi tin nhắn 'request'
+        hangupButton.addEventListener('click', hangup);
+
+        // Kết nối WebSocket ngay khi trang tải
+        connectWebSocket();
+
+
+        // --- Functions ---
+
+        // Hàm này chỉ tạo Peer Connection và thiết lập các listener WebRTC
+        function createPeerConnection() {
+             if (peerConnection) {
+                 console.warn('Peer connection already exists.');
+                 return;
+             }
+            console.log('Creating peer connection...');
+            peerConnection = new RTCPeerConnection(configuration);
+
+            // Xử lý khi nhận được track từ remote peer
+            peerConnection.ontrack = (event) => {
+                console.log('Received remote track', event);
+                console.log('Track details:', event.track);
+                console.log('Stream details:', event.streams[0]);
+                console.log('Track readyState:', event.track.readyState);
+                console.log('Track enabled:', event.track.enabled);
+                console.log('Track muted:', event.track.muted); // <- Log thêm cái này
+
+                const remoteTrack = event.track;
+
+                 // Chỉ set srcObject nếu remoteVideo chưa có stream (hoặc nếu muốn thay thế stream)
+                 if (!remoteVideo.srcObject || remoteVideo.srcObject !== event.streams[0]) {
+                    remoteVideo.srcObject = event.streams[0];
+                    console.log('remoteVideo srcObject set.');
+
+                    
+                     // Cập nhật UI dựa trên trạng thái track
+                     if (remoteTrack.muted) {
+                         console.warn('Remote track is muted. Video may not appear.');
+                         // Hiển thị thông báo hoặc hình ảnh placeholder
+                         // Ví dụ: document.getElementById('remoteVideoStatus').textContent = 'Remote video is muted';
+                     } else {
+                          console.log('Remote track is not muted.');
+                          // Ẩn thông báo mute nếu có
+                          // Ví dụ: document.getElementById('remoteVideoStatus').textContent = '';
+                     }
+
+
+                    // Thêm listener để theo dõi sự thay đổi trạng thái mute/enabled
+                    remoteTrack.onmute = () => {
+                         console.log('Remote track muted.');
+                         // Cập nhật UI
+                     };
+                     remoteTrack.onunmute = () => {
+                         console.log('Remote track unmuted.');
+                          // Cập nhật UI
+                     };
+                     remoteTrack.onended = () => {
+                         console.log('Remote track ended.');
+                         // Cập nhật UI, có thể ngắt kết nối
+                     };
+
+
+                     remoteVideo.onloadedmetadata = () => {
+                        console.log('Remote video metadata loaded.');
+                     };
+                      remoteVideo.onplaying = () => {
+                        console.log('Remote video is now playing.');
+                     };
+                     remoteVideo.onerror = (e) => {
+                        console.error('Remote video error:', e);
+                     };
+                    
+                 } else {
+                     console.log('remoteVideo srcObject already set to the same stream.');
+                 }
+            };
+
+            // Xử lý khi có ICE candidate mới được tạo -> Gửi qua WebSocket
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log('New ICE candidate:', event.candidate);
+                    sendMessage({ type: 'candidate', candidate: event.candidate });
+                } else {
+                    console.log('ICE gathering finished.');
+                     // Optional: Send a null candidate to signal end of candidates
+                     // sendMessage({ type: 'candidate', payload: null });
+                }
+            };
+
+             // Xử lý thay đổi trạng thái kết nối ICE
+            peerConnection.oniceconnectionstatechange = (event) => {
+                console.log(`ICE connection state: ${peerConnection.iceConnectionState}`);
+                 if (peerConnection.iceConnectionState === 'disconnected' ||
+                    peerConnection.iceConnectionState === 'failed' ||
+                    peerConnection.iceConnectionState === 'closed') {
+                    console.log('ICE connection disconnected or failed.');
+                    // Tự động ngắt kết nối nếu ICE bị lỗi
+                    hangup();
+                }
+            };
+
+            // negotiationneeded sẽ không được kích hoạt ở client này vì nó không thêm track
+            // và không chủ động tạo Offer. Nó chỉ là receiver.
+             peerConnection.onnegotiationneeded = () => {
+                 console.log('Negotiation needed event fired. This client is receiver, should not generate offer here.');
+                 // Client này không phải là người gọi, nên không làm gì ở đây.
+                 // Người gọi (client khác) sẽ tạo offer.
+             };
+
+
+            // Lưu ý: Không thêm local stream vào đây vì client này không gửi stream.
+
+            // requestCallButton.disabled = true; // Vô hiệu hóa nút request sau khi gửi request
+            // hangupButton.disabled = false; // Kích hoạt nút hangup khi PC được tạo (hoặc khi nhận offer)
+
+            return peerConnection;
+        }
+
+        // Hàm để gửi tin nhắn 'request' đến signaling server
+        function sendRequest() {
+             if (!webSocket || webSocket.readyState !== WebSocket.OPEN) {
+                 alert('WebSocket is not connected.');
+                 return;
+             }
+             console.log('Sending request message to server...');
+             // Gửi tin nhắn loại 'request'. Payload có thể chứa thông tin gì đó server cần (ví dụ: room ID, target user ID)
+             sendMessage({ type: 'request'}); // Ví dụ với room ID
+             requestCallButton.disabled = true; // Vô hiệu hóa nút request sau khi gửi
+             // hangupButton.disabled = false; // Nút hangup sẽ được bật khi PC được tạo (khi nhận offer)
+        }
+
+
+        function hangup() {
+            console.log('Ending call...');
+            if (peerConnection) {
+                 // Gửi tin nhắn hangup cho server để server thông báo cho remote peer
+                 sendMessage({ type: 'hangup' });
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            // Xóa stream khỏi video elements
+            remoteVideo.srcObject = null;
+
+            // Reset UI
+            // requestCallButton.disabled = false; // Không bật lại nút request ngay lập tức, chờ WS open
+            // Nếu WS vẫn mở, thì bật lại nút request
+            if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+                 requestCallButton.disabled = false;
+            }
+            hangupButton.disabled = true;
+
+
+            console.log('Call ended.');
+        }
+
+    </script>
+
 </body>
 </html>

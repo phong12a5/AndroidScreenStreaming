@@ -383,38 +383,19 @@ void WebRTCStreamer::handleIceCandidate(const std::string& sdpMid, int sdpMLineI
     // candidate.setSdpMLineIndex(sdpMLineIndex); // If libdatachannel supports this setter
     pc->addRemoteCandidate(candidate);
 }
-
+std::vector<std::byte> stored_codec_config_data;
 void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
-    if (!dc || !isDataChannelOpen) {
-        LOGE("DataChannel is not open, cannot send codec config data. dc: %p, isOpen: %d", dc.get(), isDataChannelOpen);
+    if (!data || size <= 0) {
+        LOGE("Invalid codec config data received in sendCodecConfigData.");
         return;
     }
-    if (size == 0) {
-        LOGE("Codec config data size is zero, not sending.");
-        return;
-    }
-    LOGI("Attempting to send codec config data, original size: %d", size);
-
-    // MODIFIED: Add 1-byte prefix for message type and cast to std::byte
-//    int prefixedSize = size + 1;
-//    rtc::binary prefixedData(prefixedSize);
-//    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_CODEC_CONFIG_RAW); // Cast to std::byte
-//    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) + 1, data, size); // Ensure correct pointer type for memcpy
-//
-//    try {
-//        dc->send(prefixedData);
-//        LOGI("Codec config data sent successfully via DataChannel (prefixed), total size: %d", prefixedSize);
-//    } catch (const std::exception& e) {
-//        LOGE("Exception while sending codec config data: %s", e.what());
-//    } catch (...) {
-//        LOGE("Unknown exception while sending codec config data.");
-//    }
+    LOGI("Storing codec config data (SPS/PPS), size: %d", size);
+    stored_codec_config_data.assign(reinterpret_cast<const std::byte*>(data),
+                                    reinterpret_cast<const std::byte*>(data) + size);
 }
 
 void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFrame, int64_t pts) {
     if (size == 0) {
-        // LOGW to reduce noise for potentially frequent zero-size frames if that's a case.
-        // If zero-size frames should never happen, LOGE is fine.
         LOGE("Encoded frame data size is zero, not sending.");
         return;
     }
@@ -430,31 +411,58 @@ void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFram
         return;
     }
 
-    if (track == nullptr) {
-        LOGE("Track is null, cannot send encoded frame.");
+    // Ensure track is valid and open
+    if (!track) {
+        LOGE("Track is NULL in sendEncodedFrame, cannot send.");
         return;
     }
-
     if (!track->isOpen()) {
         LOGE("Track is not open (checked via isOpen()), cannot send encoded frame. Track: %p", track.get());
         return;
     }
 
-    // LOGI("Attempting to send encoded frame, original size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
-    rtc::FrameInfo frameInfo(pts);
-    frameInfo.payloadType = 96; // Ensure this matches the negotiated codec payload type
+    unsigned int currentTrackSSRC = track->description().getSSRCs()[0];
+    LOGI("Attempting sendFrame on SSRC: %u, isOpen: %d, PTS_us: %lld, KeyFrame: %d, DataSize: %d, SPS/PPS_Prepended: %s",
+         currentTrackSSRC,
+         track->isOpen(),
+         pts,
+         isKeyFrame,
+         size,
+         (isKeyFrame && !stored_codec_config_data.empty()) ? "yes" : "no"
+    );
 
-    auto * b = reinterpret_cast<const std::byte *>(data);
-    rtc::binary sample = {};
-    sample.assign(b, b + size);
+    rtc::binary sample_to_send;
+    const std::byte* frame_byte_data = reinterpret_cast<const std::byte*>(data);
+
+    if (isKeyFrame && !stored_codec_config_data.empty()) {
+        LOGI("Prepending SPS/PPS to keyframe. SPS/PPS size: %zu, Frame data size: %d", stored_codec_config_data.size(), size);
+        sample_to_send.reserve(stored_codec_config_data.size() + size);
+        sample_to_send.insert(sample_to_send.end(), stored_codec_config_data.begin(), stored_codec_config_data.end());
+        sample_to_send.insert(sample_to_send.end(), frame_byte_data, frame_byte_data + size);
+    } else {
+        sample_to_send.assign(frame_byte_data, frame_byte_data + size);
+    }
+
+    if (sample_to_send.empty()) {
+        LOGE("Sample to send is empty. Original frame size: %d, isKeyFrame: %d", size, isKeyFrame);
+        return;
+    }
+
+    // Convert PTS from microseconds to RTP timestamp (typically 90kHz clock rate for video)
+    int64_t rtpTimestamp = (pts * 90000LL) / 1000000LL;
+
+    rtc::FrameInfo frameInfo(rtpTimestamp);
+    frameInfo.payloadType = 96; // Ensure this matches the negotiated codec payload type (e.g., in SDP)
+//    frameInfo.ssrc = currentTrackSSRC; // This line is currently commented out from a previous step
 
     try {
-        track->sendFrame(sample, frameInfo);
-        // LOGI("Encoded frame sent successfully via Track, total size: %d", size); // Verbose, uncomment if needed for debugging
+        track->sendFrame(sample_to_send, frameInfo);
     } catch (const std::exception& e) {
-        LOGE("Exception while sending encoded frame on track: %s", e.what());
+        LOGE("Exception while sending encoded frame on track (SSRC %u): %s",
+             track->description().getSSRCs().size() > 0 ? track->description().getSSRCs()[0] : 0, e.what());
     } catch (...) {
-        LOGE("Unknown exception while sending encoded frame on track.");
+        LOGE("Unknown exception while sending encoded frame on track (SSRC %u).",
+             track->description().getSSRCs().size() > 0 ? track->description().getSSRCs()[0] : 0);
     }
 }
 

@@ -197,7 +197,7 @@ public class ScreenCaptureService extends Service {
                         Thread.sleep(2000);
                         Log.d(TAG, "Sending Codec Config Data (SPS/PPS), size: " + configData.length);
 //                        if (JniBridge.isDataChannelReady()) {
-//                            JniBridge.nativeSendCodecConfigData(configData, configData.length);
+                            JniBridge.nativeSendCodecConfigData(configData, configData.length);
 //                        } else {
 //                            Log.w(TAG, "DataChannel not ready, codec config not sent yet.");
 //                            // TODO: Consider queueing this config data if DC is expected to open soon
@@ -221,7 +221,7 @@ public class ScreenCaptureService extends Service {
                         byte[] configData = new byte[bufferInfo.size];
                         outputBuffer.get(configData);
                         // if (JniBridge.isDataChannelReady()) { // Check before sending this too
-                        //    JniBridge.nativeSendCodecConfigData(configData, configData.length);
+                            JniBridge.nativeSendCodecConfigData(configData, configData.length);
                         // } else {
                         //    Log.w(TAG, "DataChannel not ready, BUFFER_FLAG_CODEC_CONFIG not sent yet.");
                         // }

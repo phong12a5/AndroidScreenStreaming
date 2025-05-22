@@ -57,7 +57,7 @@
     <div class="video-container">
         <div>
             <h2>Remote Video</h2>
-            <video id="remoteVideo" autoplay></video>
+            <video id="remoteVideo" autoplay playsinline></video> <!-- Added playsinline -->
         </div>
     </div>
 
@@ -195,7 +195,7 @@
             // Xử lý khi nhận được track từ remote peer
             peerConnection.ontrack = (event) => {
                 console.log('Received remote track', event);
-                console.log('Track details:', event.track);
+                    console.log('Track details:', event.track);
                 console.log('Stream details:', event.streams[0]);
                 console.log('Track readyState:', event.track.readyState);
                 console.log('Track enabled:', event.track.enabled);
@@ -206,7 +206,16 @@
                  // Chỉ set srcObject nếu remoteVideo chưa có stream (hoặc nếu muốn thay thế stream)
                  if (!remoteVideo.srcObject || remoteVideo.srcObject !== event.streams[0]) {
                     remoteVideo.srcObject = event.streams[0];
-                    console.log('remoteVideo srcObject set.');
+                    console.log('remoteVideo srcObject set with stream:', event.streams[0]);
+
+                    // Attempt to play the video, in case autoplay is restricted or needs a nudge
+                    remoteVideo.play().then(() => {
+                        console.log("Remote video playback initiated by .play()");
+                    }).catch(error => {
+                        console.error("Error attempting to play remote video:", error);
+                        // This might happen due to autoplay policies if no user interaction yet,
+                        // or if the stream itself has issues.
+                    });
 
                     
                      // Cập nhật UI dựa trên trạng thái track

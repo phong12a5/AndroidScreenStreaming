@@ -18,7 +18,7 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     // Thay thế bằng địa chỉ IP của máy tính chạy Signaling Server
     // Nếu dùng emulator trên cùng máy: "ws://10.0.2.2:8080"
     // Nếu dùng thiết bị thật trong cùng mạng LAN: "ws://<IP_MAY_TINH_CUA_BAN>:8080"
-    private static final String SIGNALING_SERVER_URL = "ws://192.168.100.137:8080"; // Ensure this is correct//ws://127.0.0.1:8000/
+    private static final String SIGNALING_SERVER_URL = "ws://192.168.1.109:8080"; // Ensure this is correct//ws://127.0.0.1:8000/
 
     private ActivityMainBinding binding;
     private SignalingClient signalingClient;

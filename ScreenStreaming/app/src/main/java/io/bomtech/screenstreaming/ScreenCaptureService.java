@@ -43,7 +43,7 @@ public class ScreenCaptureService extends Service {
     private int videoWidth;
     private int videoHeight;
     private static final int VIDEO_BITRATE = 2 * 1024 * 1024; // 2 Mbps
-    private static final int VIDEO_FRAME_RATE = 30; // 30 FPS
+    private static final int VIDEO_FRAME_RATE = 20; // 30 FPS
     private static final int VIDEO_I_FRAME_INTERVAL = 1; // 1 second, key frame interval
 
     private MediaProjectionManager mediaProjectionManager;
@@ -141,8 +141,8 @@ public class ScreenCaptureService extends Service {
         // format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR); // Optional: Constant Bitrate
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            format.setInteger(MediaFormat.KEY_LATENCY, 1); // Yêu cầu encoder hoạt động ở chế độ low latency
-            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 for realtime
+//            format.setInteger(MediaFormat.KEY_LATENCY, 1); // Yêu cầu encoder hoạt động ở chế độ low latency
+//            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 for realtime
         }
 
         Log.d(TAG, "Creating video encoder with format: " + format);
@@ -231,12 +231,12 @@ public class ScreenCaptureService extends Service {
 
                     if (bufferInfo.size != 0) {
 //                        if (JniBridge.isDataChannelReady()) {
-                            byte[] encodedData = new byte[bufferInfo.size];
+                        byte[] encodedData = new byte[bufferInfo.size];
                             outputBuffer.get(encodedData);
 
-                            boolean isKeyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
+                        boolean isKeyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                              Log.d(TAG, "Sending encoded frame. Size: " + encodedData.length + ", KeyFrame: " + isKeyFrame + ", PTS: " + bufferInfo.presentationTimeUs);
-                            JniBridge.nativeSendEncodedFrame(encodedData, encodedData.length, isKeyFrame, bufferInfo.presentationTimeUs);
+                        JniBridge.nativeSendEncodedFrame(encodedData, encodedData.length, isKeyFrame, bufferInfo.presentationTimeUs);
 //                        } else {
 ////                             Log.w(TAG, "DataChannel not ready, encoded frame dropped."); // Can be very verbose
 //                        }

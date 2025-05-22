@@ -16,6 +16,7 @@ public class SignalingClient {
     private SignalingListener listener;
 
     public interface SignalingListener {
+        void onRequestReceived();
         void onOfferReceived(String sdp);
         void onAnswerReceived(String sdp);
         void onIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp);
@@ -25,6 +26,7 @@ public class SignalingClient {
     }
 
     public SignalingClient(String serverUrl, SignalingListener listener) {
+        Log.d(TAG, "Creating SignalingClient with server URL: " + serverUrl);
         this.listener = listener;
         try {
             URI serverUri = new URI(serverUrl);
@@ -44,6 +46,11 @@ public class SignalingClient {
                         JSONObject json = new JSONObject(message);
                         String type = json.optString("type");
                         switch (type) {
+                            case "request":
+                                if (listener != null) {
+                                    listener.onRequestReceived();
+                                }
+                                break;
                             case "offer":
                                 if (listener != null) {
                                     listener.onOfferReceived(json.getString("sdp"));

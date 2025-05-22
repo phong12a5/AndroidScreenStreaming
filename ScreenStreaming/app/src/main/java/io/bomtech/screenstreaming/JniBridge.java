@@ -41,7 +41,6 @@ public class JniBridge {
     }
 
     public static void onLocalDescription(String type, String sdp) {
-        Log.d(TAG, "onLocalDescription: type=" + type + ", sdp=" + sdp); // Sử dụng Log.d
         if (signalingClient != null) {
             signalingClient.sendSdp(type, sdp);
         } else {

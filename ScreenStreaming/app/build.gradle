@@ -22,9 +22,9 @@ android {
             cmake {
                 cppFlags "-std=c++17"
                 arguments.add("-DANDROID_STL=c++_shared")
-                arguments.add("-DNO_WEBSOCKET=ON")
-                arguments.add("-DNO_MEDIA=ON")
-                arguments.add("-DNO_EXAMPLES=ON")
+//                arguments.add("-DNO_WEBSOCKET=ON")
+//                arguments.add("-DNO_MEDIA=ON")
+//                arguments.add("-DNO_EXAMPLES=ON")
                 arguments.add("-DNO_TESTS=ON")
                 targets 'datachannel-static', 'screenstreaming'
             }

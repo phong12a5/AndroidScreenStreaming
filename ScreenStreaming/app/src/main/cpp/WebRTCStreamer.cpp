@@ -102,11 +102,15 @@ void WebRTCStreamer::init() {
     pc = std::make_shared<rtc::PeerConnection>(config);
 
     pc->onStateChange([](rtc::PeerConnection::State state) {
-//        LOGI("PeerConnection State: %s", rtc::toString(state).c_str());
+        LOGI("PeerConnection State: %d", state);
     });
 
+    pc->onTrack([](std::shared_ptr<rtc::Track> track) {
+        LOGI("Track received: %s, open: %d, des:", track->mid().c_str(), track->isOpen(), track->description().description().c_str());
+        // Handle incoming track if needed
+    });
     pc->onGatheringStateChange([](rtc::PeerConnection::GatheringState state) {
-//        LOGI("PeerConnection Gathering State: %s", rtc::toString(state).c_str());
+        LOGI("PeerConnection Gathering State: %d", state);
     });
 
     pc->onLocalDescription([this](rtc::Description description) {
@@ -153,7 +157,14 @@ void WebRTCStreamer::init() {
         env->DeleteLocalRef(candidateStr);
     });
 
-    // dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
+    const rtc::SSRC kVideoSSRC = 42;
+    auto videoDesc = rtc::Description::Video();
+    videoDesc.addSSRC(kVideoSSRC, "video-stream", "stream1", "video-stream");
+    videoDesc.addH264Codec(96);
+    track = pc->addTrack(videoDesc);
+
+
+     dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
     // LOGI("DataChannel 'screenStream' created");
 
     // NEW: Set up handler for incoming DataChannel
@@ -238,7 +249,7 @@ void WebRTCStreamer::startStreaming() {
         init(); 
     }
     LOGI("Setting local description (creating offer)");
-    pc->setLocalDescription(); 
+    pc->setLocalDescription();
 }
 
 void WebRTCStreamer::stopStreaming() {
@@ -283,18 +294,20 @@ void WebRTCStreamer::sendDataChannelMessage(std::string message) {
 
 void WebRTCStreamer::handleOffer(const std::string& sdp) {
     LOGI("WebRTCStreamer::handleOffer");
-    if (!pc) {
-        init();
-    }
-    const rtc::SSRC ssrc = 42;
-    rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
-    media.addH264Codec(96); // Must match the payload type of the external h264 RTP stream
-    media.addSSRC(ssrc, "video-send");
-    track = pc->addTrack(media);
-    pc->setLocalDescription(); // Create answer
+//    if (!pc) {
+//        init();
+//    }
+//    const rtc::SSRC kVideoSSRC = 42;
+//    auto videoDesc = rtc::Description::Video();
+//    videoDesc.addSSRC(kVideoSSRC, "video-send");
+//    videoDesc.addH264Codec(96);
+//    track = pc->addTrack(videoDesc);
+//
 //
 //    rtc::Description offer(sdp, "offer");
 //    pc->setRemoteDescription(offer);
+//    pc->createAnswer();
+//    pc->setLocalDescription();
 }
 
 void WebRTCStreamer::handleAnswer(const std::string& sdp) {
@@ -303,6 +316,7 @@ void WebRTCStreamer::handleAnswer(const std::string& sdp) {
         LOGE("PeerConnection not initialized in handleAnswer");
         return;
     }
+
     rtc::Description answer(sdp, "answer");
     pc->setRemoteDescription(answer);
 }
@@ -345,30 +359,50 @@ void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
 //    }
 }
 
-void WebRTCStreamer::sendEncodedFrame(const uint8_t* data, int size, bool isKeyFrame, int64_t pts) {
-    if (!dc || !isDataChannelOpen) {
-        LOGE("DataChannel is not open, cannot send encoded frame. dc: %p, isOpen: %d", dc.get(), isDataChannelOpen);
-        return;
-    }
+void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFrame, int64_t pts) {
     if (size == 0) {
+        // LOGW to reduce noise for potentially frequent zero-size frames if that's a case.
+        // If zero-size frames should never happen, LOGE is fine.
         LOGE("Encoded frame data size is zero, not sending.");
         return;
     }
-    // LOGI("Attempting to send encoded frame, original size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
 
-    // MODIFIED: Add 1-byte prefix for message type and cast to std::byte
-    int prefixedSize = size;
-    rtc::binary prefixedData(prefixedSize);
-//    prefixedData[0] = static_cast<std::byte>(MSG_TYPE_VIDEO_FRAME_RAW); // Cast to std::byte
-    memcpy(reinterpret_cast<uint8_t*>(prefixedData.data()) , data, size); // Ensure correct pointer type for memcpy
+    if (!pc) {
+        LOGE("PeerConnection is null, cannot send encoded frame.");
+        return;
+    }
+
+    rtc::PeerConnection::State pcState = pc->state();
+    if (pcState == rtc::PeerConnection::State::Closed || pcState == rtc::PeerConnection::State::Failed) {
+        LOGE("PeerConnection is closed or failed (state: %d), cannot send encoded frame.", static_cast<int>(pcState));
+        return;
+    }
+
+    if (track == nullptr) {
+        LOGE("Track is null, cannot send encoded frame.");
+        return;
+    }
+
+    if (!track->isOpen()) {
+        LOGE("Track is not open (checked via isOpen()), cannot send encoded frame. Track: %p", track.get());
+        return;
+    }
+
+    // LOGI("Attempting to send encoded frame, original size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
+    rtc::FrameInfo frameInfo(pts);
+    frameInfo.payloadType = 96; // Ensure this matches the negotiated codec payload type
+
+    auto * b = reinterpret_cast<const std::byte *>(data);
+    rtc::binary sample = {};
+    sample.assign(b, b + size);
 
     try {
-        track->send(prefixedData);
-        // LOGI("Encoded frame sent successfully via DataChannel (prefixed), total size: %d", prefixedSize); // This can be very verbose
+        track->sendFrame(sample, frameInfo);
+        // LOGI("Encoded frame sent successfully via Track, total size: %d", size); // Verbose, uncomment if needed for debugging
     } catch (const std::exception& e) {
-        LOGE("Exception while sending encoded frame: %s", e.what());
+        LOGE("Exception while sending encoded frame on track: %s", e.what());
     } catch (...) {
-        LOGE("Unknown exception while sending encoded frame.");
+        LOGE("Unknown exception while sending encoded frame on track.");
     }
 }
 
@@ -389,7 +423,7 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeInit(JNIEnv *env, jclass clazz, 
     if (!g_webRTCStreamer) {
         g_webRTCStreamer = std::make_shared<WebRTCStreamer>();
     }
-    g_webRTCStreamer->init();
+//    g_webRTCStreamer->init();
 }
 
 JNIEXPORT void JNICALL
@@ -481,7 +515,7 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeSendEncodedFrame(
         // LOGE("Failed to get byte array elements from dataArray in nativeSendEncodedFrame"); // Can be verbose
         return;
     }
-    g_webRTCStreamer->sendEncodedFrame(reinterpret_cast<const uint8_t*>(data), size, isKeyFrame, presentationTimeUs);
+    g_webRTCStreamer->sendEncodedFrame(reinterpret_cast<const char*>(data), size, isKeyFrame, presentationTimeUs);
     env->ReleaseByteArrayElements(dataArray, data, JNI_ABORT);
 }
 

@@ -36,22 +36,14 @@ function startSession() {
 
     signalingSocket = new WebSocket(SIGNALING_SERVER_URL);
 
-    signalingSocket.onopen = async () => { // async để dùng await cho createOffer
-        updateStatus("Connected to signaling server. Creating offer...");
-        createPeerConnection(); // Tạo PC trước
+    signalingSocket.onopen = async () => { // async to use await
+        updateStatus("Connected to signaling server. Sending request...");
+        createPeerConnection(); // Create PC instance
         try {
-            // Thêm transceiver để chỉ định chúng ta muốn nhận video
-            // 'recvonly' nghĩa là chúng ta chỉ nhận, không gửi video.
-            pc.addTransceiver('video', { direction: 'recvonly' });
-            // Nếu bạn cũng muốn nhận audio từ Android (ví dụ: mic), thêm transceiver cho audio:
-            // pc.addTransceiver('audio', { direction: 'recvonly' });
-
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            updateStatus("Offer created. Sending offer...");
-            signalingSocket.send(JSON.stringify(pc.localDescription)); // Gửi offer
+            signalingSocket.send(JSON.stringify({ type: 'request' }));
+            updateStatus("Request sent. Waiting for offer...");
         } catch (error) {
-            handleError("Error creating or sending offer: " + error);
+            handleError("Error sending request: " + error);
         }
     };
 
@@ -59,14 +51,32 @@ function startSession() {
         const message = JSON.parse(event.data);
         console.log("Received from signaling:", message);
 
-        if (message.type === 'answer') { // Bây giờ chúng ta mong đợi 'answer'
-            if (pc && !pc.currentRemoteDescription) { // Chỉ set remote desc nếu chưa có
+        if (message.type === 'offer') { // Handle offer from the server (Android)
+            if (!pc) {
+                // This should ideally not happen if createPeerConnection is called in onopen
+                console.warn("PeerConnection not created when offer received. Creating now.");
+                createPeerConnection();
+            }
+            updateStatus("Offer received. Setting remote description and creating answer...");
+            try {
+                await pc.setRemoteDescription(new RTCSessionDescription(message));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                updateStatus("Answer created. Sending answer...");
+                signalingSocket.send(JSON.stringify(pc.localDescription)); // Send the answer
+            } catch (error) {
+                handleError("Error processing offer or creating/sending answer: " + error);
+            }
+        } else if (message.type === 'answer') { // This case is less likely in the new flow
+            if (pc && pc.signalingState === 'have-local-offer') {
                 updateStatus("Answer received. Setting remote description...");
                 try {
                     await pc.setRemoteDescription(new RTCSessionDescription(message));
                 } catch (error) {
                     handleError("Error setting remote description (answer): " + error);
                 }
+            } else {
+                console.warn("Received answer, but not expecting one (e.g., not in 'have-local-offer' state). Current signaling state:", pc ? pc.signalingState : "pc is null");
             }
         } else if (message.type === 'candidate') {
             if (pc && pc.remoteDescription) { // Chỉ add candidate sau khi đã set remote description

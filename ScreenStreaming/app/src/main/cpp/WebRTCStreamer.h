@@ -20,7 +20,7 @@ public:
     void handleAnswer(const std::string& sdp);
     void handleIceCandidate(const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp);
     void sendCodecConfigData(const uint8_t* data, int size);
-    void sendEncodedFrame(const uint8_t* data, int size, bool isKeyFrame, int64_t pts);
+    void sendEncodedFrame(const char* data, int size, bool isKeyFrame, int64_t pts);
 
 private:
     std::shared_ptr<rtc::PeerConnection> pc;

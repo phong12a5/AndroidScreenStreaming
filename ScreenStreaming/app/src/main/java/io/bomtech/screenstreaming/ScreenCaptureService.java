@@ -140,6 +140,11 @@ public class ScreenCaptureService extends Service {
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, VIDEO_I_FRAME_INTERVAL);
         // format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR); // Optional: Constant Bitrate
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            format.setInteger(MediaFormat.KEY_LATENCY, 1); // Yêu cầu encoder hoạt động ở chế độ low latency
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 for realtime
+        }
+
         Log.d(TAG, "Creating video encoder with format: " + format);
         videoEncoder = MediaCodec.createEncoderByType(VIDEO_MIME_TYPE);
         videoEncoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
@@ -156,7 +161,7 @@ public class ScreenCaptureService extends Service {
         Log.d(TAG, "VirtualDisplay created and directed to encoder surface.");
 
         // Start a thread to handle encoder output
-        encoderThread = new HandlerThread("EncoderOutputThread");
+        encoderThread = new HandlerThread("EncoderOutputThread", Thread.MAX_PRIORITY);
         encoderThread.start();
         encoderHandler = new Handler(encoderThread.getLooper());
         encoderHandler.post(this::drainEncoder);
@@ -192,7 +197,7 @@ public class ScreenCaptureService extends Service {
                         Thread.sleep(2000);
                         Log.d(TAG, "Sending Codec Config Data (SPS/PPS), size: " + configData.length);
 //                        if (JniBridge.isDataChannelReady()) {
-                            JniBridge.nativeSendCodecConfigData(configData, configData.length);
+//                            JniBridge.nativeSendCodecConfigData(configData, configData.length);
 //                        } else {
 //                            Log.w(TAG, "DataChannel not ready, codec config not sent yet.");
 //                            // TODO: Consider queueing this config data if DC is expected to open soon
@@ -225,16 +230,16 @@ public class ScreenCaptureService extends Service {
                     }
 
                     if (bufferInfo.size != 0) {
-                        if (JniBridge.isDataChannelReady()) {
+//                        if (JniBridge.isDataChannelReady()) {
                             byte[] encodedData = new byte[bufferInfo.size];
                             outputBuffer.get(encodedData);
 
                             boolean isKeyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                              Log.d(TAG, "Sending encoded frame. Size: " + encodedData.length + ", KeyFrame: " + isKeyFrame + ", PTS: " + bufferInfo.presentationTimeUs);
                             JniBridge.nativeSendEncodedFrame(encodedData, encodedData.length, isKeyFrame, bufferInfo.presentationTimeUs);
-                        } else {
-                            // Log.w(TAG, "DataChannel not ready, encoded frame dropped."); // Can be very verbose
-                        }
+//                        } else {
+////                             Log.w(TAG, "DataChannel not ready, encoded frame dropped."); // Can be very verbose
+//                        }
                     }
 
                     videoEncoder.releaseOutputBuffer(outputBufferIndex, false);

@@ -1,9 +1,25 @@
 #include "WebRTCStreamer.h"
 #include "rtc/rtp.hpp"
-#include <rtc/rtc.hpp> 
+#include <rtc/rtc.hpp>
 #include <iostream>
 #include <jni.h> // Required for JNI calls
 #include <android/log.h> // Required for Android logging
+#include <vector> // Required for std::vector
+
+// Added for H264RtpPacketizer and related components
+#include "rtc/rtppacketizer.hpp"
+#include "rtc/h264rtppacketizer.hpp"
+#include "rtc/rtcpnackresponder.hpp"
+#include "rtc/rtcpsrreporter.hpp"
+#include "rtc/nalunit.hpp" // For NalUnit::Separator
+#include <chrono>         // For std::chrono
+
+// For htonl
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 // Define log tag for Android logging
 #define LOG_TAG "WebRTCStreamer"
@@ -89,7 +105,7 @@ WebRTCStreamer::WebRTCStreamer() : pc(nullptr), dc(nullptr) {
 WebRTCStreamer::~WebRTCStreamer() {
     LOGI("WebRTCStreamer destructor");
     stopStreaming();
-}
+    }
 
 void WebRTCStreamer::init() {
     LOGI("WebRTCStreamer::init");
@@ -138,13 +154,13 @@ void WebRTCStreamer::init() {
     pc->onLocalCandidate([this](rtc::Candidate candidate) {
         LOGI("Local Candidate: mid=%s, sdp=%s", candidate.mid().c_str(), std::string(candidate).c_str());
         JNIEnv* env = getJNIEnv();
-         if (!env || !g_jniBridgeInstance) {
-            LOGE("JNIEnv or JniBridge instance is null in onLocalCandidate");
+        if (!env || !g_jniBridgeInstance) {
+        LOGE("JNIEnv or JniBridge instance is null in onLocalCandidate");
             return;
         }
-        jclass cls = env->GetObjectClass(g_jniBridgeInstance);
+jclass cls = env->GetObjectClass(g_jniBridgeInstance);
         jmethodID mid = env->GetStaticMethodID(cls, "onLocalIceCandidate", "(Ljava/lang/String;ILjava/lang/String;)V");
-         if (mid == nullptr) {
+        if (mid == nullptr) {
             LOGE("Failed to find onLocalIceCandidate method");
             env->DeleteLocalRef(cls);
             return;
@@ -152,19 +168,52 @@ void WebRTCStreamer::init() {
         jstring midStr = stringToJstring(env, candidate.mid());
         jstring candidateStr = stringToJstring(env, std::string(candidate));
         env->CallStaticVoidMethod(cls, mid, midStr, 0 /* sdpMLineIndex placeholder */, candidateStr);
-        env->DeleteLocalRef(cls);
+env->DeleteLocalRef(cls);
         env->DeleteLocalRef(midStr);
         env->DeleteLocalRef(candidateStr);
     });
 
-    const rtc::SSRC kVideoSSRC = 42;
-    auto videoDesc = rtc::Description::Video();
-    videoDesc.addSSRC(kVideoSSRC, "video-stream", "stream1", "video-stream");
-    videoDesc.addH264Codec(96);
-    track = pc->addTrack(videoDesc);
-    track->onOpen([this]() {
-        LOGI("Track opened");
-    });
+    // Video track setup using H264RtpPacketizer
+    const rtc::SSRC kVideoSSRC = 42; // SSRC for the video track
+    uint8_t payloadType = 96;        // H.264 payload type, must match SDP
+    std::string cname = "android-screen-stream"; // Canonical Name for RTCP
+    std::string msid = "android-stream-id";   // Media Stream ID
+    std::string videoTrackId = "video0";      // Track ID for the description
+
+    rtc::Description::Video videoDesc(videoTrackId, rtc::Description::Direction::SendOnly);
+    videoDesc.addH264Codec(payloadType); // Payload type 96 for H264
+    videoDesc.addSSRC(kVideoSSRC, cname, msid, cname); // Add SSRC information
+
+    track = pc->addTrack(videoDesc); // Add track to PeerConnection
+
+    if (track) {
+        LOGI("Video track added to PeerConnection with SSRC: %u, PT: %u", kVideoSSRC, payloadType);
+
+        // Setup H264RtpPacketizer
+        auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
+                kVideoSSRC, cname, payloadType, rtc::H264RtpPacketizer::ClockRate
+        );
+
+        // Using NalUnit::Separator::Length as per libdatachannel examples for file streaming
+        // This requires the input to sendFrame to be length-prefixed NALUs.
+        auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+                rtc::NalUnit::Separator::LongStartSequence, rtpConfig
+        );
+
+        // Add RTCP Sender Report (SR) and NACK responder capabilities
+        auto srReporter = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
+        packetizer->addToChain(srReporter);
+
+        auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
+        packetizer->addToChain(nackResponder);
+
+        track->setMediaHandler(packetizer); // Set the packetizer as the media handler for the track
+        LOGI("H264RtpPacketizer (Separator::Length) set as media handler for the video track.");
+
+        track->onOpen([this, kVideoSSRC]() {
+            LOGI("Video track (SSRC: %u) opened.", kVideoSSRC);
+        });
+    }
 
 
      dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
@@ -214,7 +263,7 @@ void WebRTCStreamer::init() {
             env->CallStaticVoidMethod(cls, mid);
             LOGI("Called JniBridge.onNativeDataChannelClose() for incoming DC");
             env->DeleteLocalRef(cls);
-        });
+            });
 
         this->dc->onMessage([this](auto data) {
             if (std::holds_alternative<std::string>(data)) {
@@ -253,7 +302,7 @@ void WebRTCStreamer::startStreaming() {
     }
     LOGI("Setting local description (creating offer)");
     pc->setLocalDescription();
-}
+    }
 
 void WebRTCStreamer::stopStreaming() {
     LOGI("WebRTCStreamer::stopStreaming");

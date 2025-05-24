@@ -5,6 +5,22 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <thread>               // For std::thread
+#include <mutex>                // For std::mutex
+#include <condition_variable>   // For std::condition_variable
+#include <queue>                // For std::queue
+#include <atomic>               // For std::atomic
+
+
+struct QueuedFrame {
+    rtc::binary data;
+    rtc::FrameInfo frameInfo;
+    bool isKeyFrame_log;
+    int original_size_log;
+    int64_t pts_log;
+
+    QueuedFrame() : frameInfo(0), isKeyFrame_log(false), original_size_log(0), pts_log(0) {}
+};
 
 class WebRTCStreamer {
 public:
@@ -23,10 +39,21 @@ public:
     void sendEncodedFrame(const char* data, int size, bool isKeyFrame, int64_t pts);
 
 private:
+    void sendingThreadLoop(); // Declaration for the sending thread's main function
+
     std::shared_ptr<rtc::PeerConnection> pc;
     std::shared_ptr<rtc::DataChannel> dc;
     std::shared_ptr<rtc::Track> track;
-    bool isDataChannelOpen = false; // Add this flag
+    bool isDataChannelOpen = false;
+
+    // NEW: Threading and Queueing members
+    std::thread m_sendingThread;
+    std::queue<QueuedFrame> m_frameQueue;
+    std::mutex m_queueMutex;
+    std::condition_variable m_queueCondVar;
+    std::atomic<bool> m_isStreamingActive{false}; // Initialize here or in constructor
+    std::vector<std::byte> stored_codec_config_data; // Moved from .cpp to be a member
+
     // Add other WebRTC related members
 };
 

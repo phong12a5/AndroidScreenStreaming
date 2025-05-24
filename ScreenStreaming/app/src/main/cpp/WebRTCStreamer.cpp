@@ -14,6 +14,13 @@
 #include "rtc/nalunit.hpp" // For NalUnit::Separator
 #include <chrono>         // For std::chrono
 
+// NEW: Threading and Queueing
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
+
 // For htonl
 #ifdef _WIN32
 #include <winsock2.h>
@@ -21,10 +28,19 @@
 #include <arpa/inet.h>
 #endif
 
+#if defined(__ANDROID__)
+#include <pthread.h>
+#include <sys/resource.h> // For setpriority
+#include <unistd.h> // for gettid
+#endif
+
+
 // Define log tag for Android logging
 #define LOG_TAG "WebRTCStreamer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__) // Added for warnings
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__) // Added for debug
 
 // NEW: Message type prefixes (must match JavaScript)
 const uint8_t MSG_TYPE_CODEC_CONFIG_RAW = 0x01;
@@ -34,6 +50,9 @@ const uint8_t MSG_TYPE_VIDEO_FRAME_RAW = 0x02;
 static std::shared_ptr<WebRTCStreamer> g_webRTCStreamer;
 static JavaVM* g_javaVM = nullptr;
 static jobject g_jniBridgeInstance = nullptr; // Global reference to JniBridge instance
+
+// NEW: Frame queue settings
+#define MAX_FRAME_QUEUE_SIZE 60 // Max number of frames in the queue (e.g., 2 seconds at 30fps)
 
 // Helper function to get JNIEnv for the current thread
 JNIEnv* getJNIEnv() {
@@ -97,14 +116,14 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_6;
 }
 
-WebRTCStreamer::WebRTCStreamer() : pc(nullptr), dc(nullptr) {
+WebRTCStreamer::WebRTCStreamer() : pc(nullptr), dc(nullptr), m_isStreamingActive{false} {
     LOGI("WebRTCStreamer constructor");
     // Initialization, if any, can go here or in init()
 }
 
 WebRTCStreamer::~WebRTCStreamer() {
     LOGI("WebRTCStreamer destructor");
-    stopStreaming();
+    stopStreaming(); // Ensures thread is stopped and joined
     }
 
 void WebRTCStreamer::init() {
@@ -294,18 +313,138 @@ env->DeleteLocalRef(cls);
     });
 }
 
+void WebRTCStreamer::sendingThreadLoop() {
+    LOGI("Sending thread started.");
+
+    pid_t tid = gettid();
+    if (setpriority(PRIO_PROCESS, tid, -20) != 0) {
+        LOGW("Failed to set sending thread priority using setpriority: %s. errno: %d", strerror(errno), errno);
+    } else {
+        LOGI("Successfully set sending thread priority for tid %d using setpriority.", tid);
+    }
+
+    while (m_isStreamingActive) {
+        QueuedFrame frame;
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueCondVar.wait(lock, [this] {
+                return !m_frameQueue.empty() || !m_isStreamingActive;
+            });
+
+            if (!m_isStreamingActive && m_frameQueue.empty()) {
+                LOGI("Sending thread stopping: streaming inactive and queue empty.");
+                break;
+            }
+            if (m_frameQueue.empty()) { // Spurious wakeup or stopping without frames
+                continue;
+            }
+
+            frame = std::move(m_frameQueue.front()); // Use std::move
+            m_frameQueue.pop();
+        } // Mutex is released here
+
+        if (track && track->isOpen()) {
+            try {
+                auto send_start_time = std::chrono::high_resolution_clock::now();
+
+                track->sendFrame(frame.data, frame.frameInfo);
+
+                auto send_end_time = std::chrono::high_resolution_clock::now();
+                auto send_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(send_end_time - send_start_time).count();
+
+                if (frame.isKeyFrame_log) {
+                    LOGD("Frame sent from queue. OrigSize: %d, SentSize: %zu, KeyFrame: %d, PTS: %lld, RTP TS: %lld, SendTime: %lld ms, Queue: %zu",
+                         frame.original_size_log, frame.data.size(), frame.isKeyFrame_log,
+                         frame.pts_log, frame.frameInfo.timestamp, send_duration_ms,
+                         m_frameQueue.size());
+                }
+            } catch (const std::exception& e) {
+                LOGE("Exception in sending thread while sending frame (SSRC %u): %s. Queue size: %zu",
+                     track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], e.what(), m_frameQueue.size());
+            } catch (...) {
+                LOGE("Unknown exception in sending thread while sending frame (SSRC %u). Queue size: %zu",
+                     track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], m_frameQueue.size());
+            }
+        } else {
+            LOGW("Track is not open or null in sending thread, discarding frame. Frame PTS: %lld. Queue size: %zu", frame.pts_log, m_frameQueue.size());
+            // Consider clearing the queue if the track is permanently gone, or rely on stopStreaming.
+        }
+    }
+    LOGI("Sending thread finished. Remaining queue size: %zu", m_frameQueue.size());
+    // Clear any remaining frames in the queue when thread exits
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    std::queue<QueuedFrame> empty;
+    std::swap(m_frameQueue, empty);
+    LOGI("Frame queue cleared on sending thread exit.");
+}
+
+
 void WebRTCStreamer::startStreaming() {
     LOGI("WebRTCStreamer::startStreaming");
     if (!pc) {
         LOGI("PeerConnection not initialized, calling init()");
-        init(); 
+        init();
     }
+    if (!pc) {
+        LOGE("PeerConnection still not initialized after init() in startStreaming. Cannot start.");
+        return;
+    }
+    if (!track) {
+        LOGE("Track not initialized in startStreaming. Cannot start sending thread.");
+        return;
+    }
+
+    // Start the sending thread if not already running
+    if (!m_isStreamingActive || (m_sendingThread.joinable() && m_sendingThread.get_id() == std::thread::id())) {
+        LOGI("Attempting to start sending thread.");
+        m_isStreamingActive = true;
+        // Clear queue before starting, in case of restart
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            std::queue<QueuedFrame> empty;
+            std::swap(m_frameQueue, empty);
+            LOGI("Frame queue cleared before starting new thread.");
+        }
+        if (m_sendingThread.joinable()) { // If thread object exists but is finished
+            m_sendingThread.join(); // Clean up previous thread resource
+            LOGI("Joined previous sending thread instance.");
+        }
+        m_sendingThread = std::thread(&WebRTCStreamer::sendingThreadLoop, this);
+        LOGI("Sending thread created.");
+    } else {
+        LOGI("Sending thread already active or thread object valid.");
+    }
+
     LOGI("Setting local description (creating offer)");
     pc->setLocalDescription();
-    }
+}
 
 void WebRTCStreamer::stopStreaming() {
     LOGI("WebRTCStreamer::stopStreaming");
+
+    if (m_isStreamingActive) {
+        m_isStreamingActive = false;      // Signal the sending thread to stop
+        m_queueCondVar.notify_one(); // Wake up the sending thread if it's waiting
+        LOGI("Signaled sending thread to stop.");
+    }
+
+    if (m_sendingThread.joinable()) {
+        LOGI("Joining sending thread...");
+        m_sendingThread.join();
+        LOGI("Sending thread joined.");
+    } else {
+        LOGI("Sending thread was not joinable.");
+    }
+    
+    // Clear the queue one last time after thread has stopped
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        std::queue<QueuedFrame> empty;
+        std::swap(m_frameQueue, empty);
+        LOGI("Frame queue cleared in stopStreaming.");
+    }
+
+
     if (dc && dc->isOpen()) {
         LOGI("Closing DataChannel");
         dc->close();
@@ -395,75 +534,74 @@ void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
 }
 
 void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFrame, int64_t pts) {
-    if (size == 0) {
-        LOGE("Encoded frame data size is zero, not sending.");
+    if (size <= 0) { // Changed from size == 0 to size <= 0
+        LOGE("Encoded frame data size is invalid (%d), not queuing.", size);
+        return;
+    }
+
+    if (!m_isStreamingActive) {
+        // LOGW("Streaming is not active, frame not queued. Size: %d, PTS: %lld", size, pts); // Can be verbose
         return;
     }
 
     if (!pc) {
-        LOGE("PeerConnection is null, cannot send encoded frame.");
+        LOGE("PeerConnection is null, cannot queue encoded frame. PTS: %lld", pts);
         return;
     }
+    // Track validity is checked by the sending thread before sending.
+    // If track is null from the start, m_isStreamingActive should ideally not be true,
+    // or startStreaming should prevent thread creation.
 
-    rtc::PeerConnection::State pcState = pc->state();
-    if (pcState == rtc::PeerConnection::State::Closed || pcState == rtc::PeerConnection::State::Failed) {
-        LOGE("PeerConnection is closed or failed (state: %d), cannot send encoded frame.", static_cast<int>(pcState));
-        return;
-    }
-
-    // Ensure track is valid and open
-    if (!track) {
-        LOGE("Track is NULL in sendEncodedFrame, cannot send.");
-        return;
-    }
-    if (!track->isOpen()) {
-        LOGE("Track is not open (checked via isOpen()), cannot send encoded frame. Track: %p", track.get());
-        return;
-    }
-
-    unsigned int currentTrackSSRC = track->description().getSSRCs()[0];
-    LOGI("Attempting sendFrame on SSRC: %u, isOpen: %d, PTS_us: %lld, KeyFrame: %d, DataSize: %d, SPS/PPS_Prepended: %s",
-         currentTrackSSRC,
-         track->isOpen(),
-         pts,
-         isKeyFrame,
-         size,
-         (isKeyFrame && !stored_codec_config_data.empty()) ? "yes" : "no"
-    );
-
-    rtc::binary sample_to_send;
+    rtc::binary sample_to_queue;
     const std::byte* frame_byte_data = reinterpret_cast<const std::byte*>(data);
 
+    // Prepend SPS/PPS if it's a keyframe and config data is available
     if (isKeyFrame && !stored_codec_config_data.empty()) {
-        LOGI("Prepending SPS/PPS to keyframe. SPS/PPS size: %zu, Frame data size: %d", stored_codec_config_data.size(), size);
-        sample_to_send.reserve(stored_codec_config_data.size() + size);
-        sample_to_send.insert(sample_to_send.end(), stored_codec_config_data.begin(), stored_codec_config_data.end());
-        sample_to_send.insert(sample_to_send.end(), frame_byte_data, frame_byte_data + size);
+        // LOGD("Prepending SPS/PPS to keyframe for queue. SPS/PPS size: %zu, Frame data size: %d", stored_codec_config_data.size(), size);
+        sample_to_queue.reserve(stored_codec_config_data.size() + size);
+        sample_to_queue.insert(sample_to_queue.end(), stored_codec_config_data.begin(), stored_codec_config_data.end());
+        sample_to_queue.insert(sample_to_queue.end(), frame_byte_data, frame_byte_data + size);
     } else {
-        sample_to_send.assign(frame_byte_data, frame_byte_data + size);
+        sample_to_queue.assign(frame_byte_data, frame_byte_data + size);
     }
 
-    if (sample_to_send.empty()) {
-        LOGE("Sample to send is empty. Original frame size: %d, isKeyFrame: %d", size, isKeyFrame);
+    if (sample_to_queue.empty()) {
+        LOGE("Sample to queue is empty after processing. Original frame size: %d, isKeyFrame: %d, PTS: %lld", size, isKeyFrame, pts);
         return;
     }
 
     // Convert PTS from microseconds to RTP timestamp (typically 90kHz clock rate for video)
-    int64_t rtpTimestamp = (pts * 90000LL) / 1000000LL;
+    int64_t rtpTimestamp = (pts * 90000LL) / 1000000LL; // 90kHz clock
 
     rtc::FrameInfo frameInfo(rtpTimestamp);
     frameInfo.payloadType = 96; // Ensure this matches the negotiated codec payload type (e.g., in SDP)
-//    frameInfo.ssrc = currentTrackSSRC; // This line is currently commented out from a previous step
+    // frameInfo.ssrc = ...; // SSRC is usually handled by the RtpPacketizer bound to the track
 
-    try {
-        track->sendFrame(sample_to_send, frameInfo);
-    } catch (const std::exception& e) {
-        LOGE("Exception while sending encoded frame on track (SSRC %u): %s",
-             track->description().getSSRCs().size() > 0 ? track->description().getSSRCs()[0] : 0, e.what());
-    } catch (...) {
-        LOGE("Unknown exception while sending encoded frame on track (SSRC %u).",
-             track->description().getSSRCs().size() > 0 ? track->description().getSSRCs()[0] : 0);
+    QueuedFrame qFrame;
+    qFrame.data = std::move(sample_to_queue);
+    qFrame.frameInfo = frameInfo;
+    qFrame.isKeyFrame_log = isKeyFrame;
+    qFrame.original_size_log = size;
+    qFrame.pts_log = pts;
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_frameQueue.size() < MAX_FRAME_QUEUE_SIZE) {
+            m_frameQueue.push(std::move(qFrame));
+        } else {
+            // Simple strategy: drop oldest non-keyframe if possible, or current frame if queue is full of keyframes or if it's simpler.
+            // For now, just drop current if full. More sophisticated dropping (e.g. P-frames) can be added.
+            LOGW("Frame queue is full (size: %zu / %d). Dropping current frame. PTS: %lld, isKeyFrame: %d",
+                 m_frameQueue.size(), MAX_FRAME_QUEUE_SIZE, pts, isKeyFrame);
+            // To implement dropping oldest: m_frameQueue.pop(); m_frameQueue.push(std::move(qFrame));
+            // But be careful with keyframes.
+            return; // Return if dropped
+        }
     }
+    m_queueCondVar.notify_one(); // Notify the sending thread
+
+//    LOGD("Frame queued. OrigSize: %d, PTS: %lld. Queue depth: %zu", size, pts, m_frameQueue.size());
+    // Removed verbose logging of RTP timestamp and full data size here, as sending thread will log.
 }
 
 

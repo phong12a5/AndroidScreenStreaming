@@ -42,9 +42,11 @@ public class ScreenCaptureService extends Service {
     private static final String VIDEO_MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC; // H.264
     private int videoWidth;
     private int videoHeight;
-    private static final int VIDEO_BITRATE = 512 * 1024; // 2 Mbps
+    private static final int VIDEO_MAX_WIDTH = 320;
+    private static final int VIDEO_MAX_HEIGHT = 640;
+    private static final int VIDEO_BITRATE = 512 * 1024; // 1 Mbps
     private static final int VIDEO_FRAME_RATE = 15; // 30 FPS
-    private static final int VIDEO_I_FRAME_INTERVAL = 1; // 1 second, key frame interval
+    private static final int VIDEO_I_FRAME_INTERVAL = 10; // 1 second, key frame interval
 
     private MediaProjectionManager mediaProjectionManager;
     private MediaProjection mediaProjection;
@@ -77,9 +79,23 @@ public class ScreenCaptureService extends Service {
         screenWidth = metrics.widthPixels;
         screenHeight = metrics.heightPixels;
 
+        float screenRatio = (float) screenHeight / screenWidth;
+        // Adjust video width and height based on screen ratio, make sure fit in 320x640
+        if (screenRatio > 2) { // if screenRate > 640/320
+            videoHeight = VIDEO_MAX_HEIGHT;
+            videoWidth = (int) (videoHeight / screenRatio);
+        } else {
+            videoWidth = VIDEO_MAX_WIDTH;
+            videoHeight = (int) (videoWidth * screenRatio);
+        }
+
+
+        /*
         // Set video dimensions (e.g., half of screen resolution)
         videoWidth = screenWidth / 2;
         videoHeight = screenHeight / 2;
+         */
+
         // Ensure width and height are multiples of 2, common requirement for encoders
         if (videoWidth % 2 != 0) videoWidth--;
         if (videoHeight % 2 != 0) videoHeight--;
@@ -141,8 +157,8 @@ public class ScreenCaptureService extends Service {
         // format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR); // Optional: Constant Bitrate
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-//            format.setInteger(MediaFormat.KEY_LATENCY, 1); // Yêu cầu encoder hoạt động ở chế độ low latency
-//            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 for realtime
+            format.setInteger(MediaFormat.KEY_LATENCY, 1); // Yêu cầu encoder hoạt động ở chế độ low latency
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0); // 0 for realtime
         }
 
         Log.d(TAG, "Creating video encoder with format: " + format);
@@ -235,7 +251,7 @@ public class ScreenCaptureService extends Service {
                             outputBuffer.get(encodedData);
 
                         boolean isKeyFrame = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
-                             Log.d(TAG, "Sending encoded frame. Size: " + encodedData.length + ", KeyFrame: " + isKeyFrame + ", PTS: " + bufferInfo.presentationTimeUs);
+//                             Log.d(TAG, "Sending encoded frame. Size: " + encodedData.length + ", KeyFrame: " + isKeyFrame + ", PTS: " + bufferInfo.presentationTimeUs);
                         JniBridge.nativeSendEncodedFrame(encodedData, encodedData.length, isKeyFrame, bufferInfo.presentationTimeUs);
 //                        } else {
 ////                             Log.w(TAG, "DataChannel not ready, encoded frame dropped."); // Can be very verbose

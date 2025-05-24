@@ -14,12 +14,13 @@ public class SignalingClient {
     private static final String TAG = "SignalingClient";
     private WebSocketClient webSocketClient;
     private SignalingListener listener;
+    String serverUrl;
 
     public interface SignalingListener {
-        void onRequestReceived();
-        void onOfferReceived(String sdp);
-        void onAnswerReceived(String sdp);
-        void onIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp);
+        void onRequestReceived(String clientId);
+        void onOfferReceived(String clientId, String sdp);
+        void onAnswerReceived(String clientId, String sdp);
+        void onIceCandidateReceived(String clientId, String sdpMid, int sdpMLineIndex, String sdp);
         void onWebSocketOpen();
         void onWebSocketClose();
         void onWebSocketError(Exception ex);
@@ -28,6 +29,10 @@ public class SignalingClient {
     public SignalingClient(String serverUrl, SignalingListener listener) {
         Log.d(TAG, "Creating SignalingClient with server URL: " + serverUrl);
         this.listener = listener;
+        this.serverUrl = serverUrl;
+    }
+
+    private void createWebSocket() {
         try {
             URI serverUri = new URI(serverUrl);
             webSocketClient = new WebSocketClient(serverUri) {
@@ -44,30 +49,32 @@ public class SignalingClient {
                     Log.d(TAG, "Received message: " + message);
                     try {
                         JSONObject json = new JSONObject(message);
-                        String type = json.optString("type");
+                        String clientId = json.getString("clientId");
+                        JSONObject data = new JSONObject(json.getString("message"));
+                        String type = data.optString("type");
                         switch (type) {
                             case "request":
                                 if (listener != null) {
-                                    listener.onRequestReceived();
+                                    listener.onRequestReceived(clientId);
                                 }
                                 break;
                             case "offer":
                                 if (listener != null) {
-                                    listener.onOfferReceived(json.getString("sdp"));
+                                    listener.onOfferReceived(clientId,data.getString("sdp"));
                                 }
                                 break;
                             case "answer":
                                 if (listener != null) {
-                                    listener.onAnswerReceived(json.getString("sdp"));
+                                    listener.onAnswerReceived(clientId,data.getString("sdp"));
                                 }
                                 break;
                             case "candidate":
                                 if (listener != null) {
-                                    JSONObject candidateJson = json.getJSONObject("candidate");
+                                    JSONObject candidateJson = data.getJSONObject("candidate");
                                     String sdpMid = candidateJson.getString("sdpMid");
                                     int sdpMLineIndex = candidateJson.getInt("sdpMLineIndex");
                                     String sdp = candidateJson.getString("candidate");
-                                    listener.onIceCandidateReceived(sdpMid, sdpMLineIndex, sdp);
+                                    listener.onIceCandidateReceived(clientId, sdpMid, sdpMLineIndex, sdp);
                                 }
                                 break;
                             default:
@@ -84,6 +91,7 @@ public class SignalingClient {
                     if (listener != null) {
                         listener.onWebSocketClose();
                     }
+                    webSocketClient = null;
                 }
 
                 @Override
@@ -92,6 +100,7 @@ public class SignalingClient {
                     if (listener != null) {
                         listener.onWebSocketError(ex);
                     }
+                    webSocketClient = null;
                 }
             };
         } catch (URISyntaxException e) {
@@ -103,6 +112,9 @@ public class SignalingClient {
     }
 
     public void connect() {
+        if (webSocketClient == null) {
+            createWebSocket();
+        }
         if (webSocketClient != null && !webSocketClient.isOpen()) {
             Log.d(TAG, "Connecting WebSocket...");
             webSocketClient.connect();

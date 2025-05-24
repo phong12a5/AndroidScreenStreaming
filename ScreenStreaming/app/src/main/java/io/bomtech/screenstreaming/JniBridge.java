@@ -16,13 +16,12 @@ public class JniBridge {
 
     // Declare native methods
     public static native void nativeInit(JniBridge bridgeInstance); // Thay đổi chữ ký
+    public static native void nativeDestroy();
     public static native void nativeStartStreaming();
     public static native void nativeStopStreaming();
-    public static native void nativeOnOfferReceived(String sdp);
-    public static native void nativeOnAnswerReceived(String sdp);
-    public static native void nativeOnIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp);
-    // public static native void nativeSendData(String message); // For sending data from Java to C++ - Consider removing if not used
-    // public static native void nativeSendFrameData(byte[] frameData, int width, int height, int format); // Old method for raw frames
+    public static native void nativeNewConnection(String clientId);
+    public static native void nativeOnAnswerReceived(String clientId, String sdp);
+    public static native void nativeOnIceCandidateReceived(String clientId, String sdpMid, int sdpMLineIndex, String sdp);
     public static native void nativeSendCodecConfigData(byte[] data, int size); // New method for codec config
     public static native void nativeSendEncodedFrame(byte[] data, int size, boolean isKeyFrame, long presentationTimeUs); // New method for encoded frames
 

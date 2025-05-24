@@ -39,22 +39,15 @@
 #define LOG_TAG "WebRTCStreamer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__) // Added for warnings
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__) // Added for debug
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
-// NEW: Message type prefixes (must match JavaScript)
-const uint8_t MSG_TYPE_CODEC_CONFIG_RAW = 0x01;
-const uint8_t MSG_TYPE_VIDEO_FRAME_RAW = 0x02;
-
-// Global WebRTCStreamer instance and JNIEnv pointer
 static std::shared_ptr<WebRTCStreamer> g_webRTCStreamer;
 static JavaVM* g_javaVM = nullptr;
-static jobject g_jniBridgeInstance = nullptr; // Global reference to JniBridge instance
+static jobject g_jniBridgeInstance = nullptr;
 
-// NEW: Frame queue settings
-#define MAX_FRAME_QUEUE_SIZE 60 // Max number of frames in the queue (e.g., 2 seconds at 30fps)
+#define MAX_FRAME_QUEUE_SIZE 60
 
-// Helper function to get JNIEnv for the current thread
 JNIEnv* getJNIEnv() {
     JNIEnv *env;
     if (g_javaVM == nullptr) {
@@ -116,36 +109,41 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_6;
 }
 
-WebRTCStreamer::WebRTCStreamer() : pc(nullptr), dc(nullptr), m_isStreamingActive{false} {
+WebRTCStreamer::WebRTCStreamer() {
     LOGI("WebRTCStreamer constructor");
-    // Initialization, if any, can go here or in init()
+    clients.clear();
 }
 
 WebRTCStreamer::~WebRTCStreamer() {
     LOGI("WebRTCStreamer destructor");
-    stopStreaming(); // Ensures thread is stopped and joined
-    }
+    stopStreaming();
+}
 
-void WebRTCStreamer::init() {
-    LOGI("WebRTCStreamer::init");
+void WebRTCStreamer::initConnection(std::shared_ptr<ClientContext> &client) {
+    LOGI("WebRTCStreamer::initConnection: %s", client->id.c_str());
     rtc::Configuration config;
-    // Example: config.iceServers.emplace_back("stun:stun.l.google.com:19302");
-    // Add your STUN/TURN servers here if needed for NAT traversal
+
     config.iceServers.emplace_back("stun:stun.l.google.com:19302");
     config.iceServers.emplace_back(rtc::IceServer("turn:149.28.142.115:3478", 3478, "admin", "Pdt1794@")); // Added TURN server
 
-    pc = std::make_shared<rtc::PeerConnection>(config);
+    client->pc = std::make_shared<rtc::PeerConnection>(config);
+    auto pc = client->pc;
 
-    pc->onStateChange([](rtc::PeerConnection::State state) {
-        LOGI("PeerConnection State: %d", state);
+    pc->onStateChange([this, client](rtc::PeerConnection::State state) {
+        LOGI("[%s] PeerConnection State: %d", client->id.c_str(), state);
+        if (state == rtc::PeerConnection::State::Disconnected ||
+            state == rtc::PeerConnection::State::Failed ||
+            state == rtc::PeerConnection::State::Closed) {
+            LOGI("PeerConnection closed or failed -> remove client: %s", client->id.c_str());
+            this->clients.erase(client->id);
+        }
     });
 
     pc->onTrack([](std::shared_ptr<rtc::Track> track) {
         LOGI("Track received: %s, open: %d, des:", track->mid().c_str(), track->isOpen(), track->description().description().c_str());
-        // Handle incoming track if needed
     });
-    pc->onGatheringStateChange([](rtc::PeerConnection::GatheringState state) {
-        LOGI("PeerConnection Gathering State: %d", state);
+    pc->onGatheringStateChange([client](rtc::PeerConnection::GatheringState state) {
+        LOGI("[%s] PeerConnection Gathering State: %d", client->id.c_str(), state);
     });
 
     pc->onLocalDescription([this](rtc::Description description) {
@@ -177,7 +175,8 @@ void WebRTCStreamer::init() {
         LOGE("JNIEnv or JniBridge instance is null in onLocalCandidate");
             return;
         }
-jclass cls = env->GetObjectClass(g_jniBridgeInstance);
+        
+        jclass cls = env->GetObjectClass(g_jniBridgeInstance);
         jmethodID mid = env->GetStaticMethodID(cls, "onLocalIceCandidate", "(Ljava/lang/String;ILjava/lang/String;)V");
         if (mid == nullptr) {
             LOGE("Failed to find onLocalIceCandidate method");
@@ -187,7 +186,7 @@ jclass cls = env->GetObjectClass(g_jniBridgeInstance);
         jstring midStr = stringToJstring(env, candidate.mid());
         jstring candidateStr = stringToJstring(env, std::string(candidate));
         env->CallStaticVoidMethod(cls, mid, midStr, 0 /* sdpMLineIndex placeholder */, candidateStr);
-env->DeleteLocalRef(cls);
+        env->DeleteLocalRef(cls);
         env->DeleteLocalRef(midStr);
         env->DeleteLocalRef(candidateStr);
     });
@@ -203,114 +202,50 @@ env->DeleteLocalRef(cls);
     videoDesc.addH264Codec(payloadType); // Payload type 96 for H264
     videoDesc.addSSRC(kVideoSSRC, cname, msid, cname); // Add SSRC information
 
-    track = pc->addTrack(videoDesc); // Add track to PeerConnection
-
-    if (track) {
+    client->track = pc->addTrack(videoDesc); // Add track to PeerConnection
+    if (client->track) {
         LOGI("Video track added to PeerConnection with SSRC: %u, PT: %u", kVideoSSRC, payloadType);
-
-        // Setup H264RtpPacketizer
         auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
                 kVideoSSRC, cname, payloadType, rtc::H264RtpPacketizer::ClockRate
         );
 
-        // Using NalUnit::Separator::Length as per libdatachannel examples for file streaming
-        // This requires the input to sendFrame to be length-prefixed NALUs.
         auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
                 rtc::NalUnit::Separator::LongStartSequence, rtpConfig
         );
 
-        // Add RTCP Sender Report (SR) and NACK responder capabilities
         auto srReporter = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
         packetizer->addToChain(srReporter);
 
         auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
         packetizer->addToChain(nackResponder);
 
-        track->setMediaHandler(packetizer); // Set the packetizer as the media handler for the track
+        client->track->setMediaHandler(packetizer); // Set the packetizer as the media handler for the track
         LOGI("H264RtpPacketizer (Separator::Length) set as media handler for the video track.");
 
-        track->onOpen([this, kVideoSSRC]() {
+        client->track->onOpen([this, kVideoSSRC]() {
             LOGI("Video track (SSRC: %u) opened.", kVideoSSRC);
         });
     }
 
 
-     dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
-    // LOGI("DataChannel 'screenStream' created");
+    client->dc = pc->createDataChannel("screenStream"); // REMOVED: DataChannel will be created by the offerer (web client)
 
-    // NEW: Set up handler for incoming DataChannel
-    pc->onDataChannel([this](std::shared_ptr<rtc::DataChannel> incomingDc) {
-        LOGI("DataChannel received: %s", incomingDc->label().c_str());
-        this->dc = incomingDc; // Assign the incoming DataChannel
-
-        this->dc->onOpen([this]() {
-            LOGI("DataChannel opened by remote");
-            isDataChannelOpen = true;
-            JNIEnv* env = getJNIEnv();
-            if (!env || !g_jniBridgeInstance) {
-                LOGE("JNIEnv or JniBridge instance is null in dc->onOpen (incoming), cannot notify Java");
-                return;
-            }
-            jclass cls = env->GetObjectClass(g_jniBridgeInstance);
-            jmethodID mid = env->GetStaticMethodID(cls, "onNativeDataChannelOpen", "()V");
-            if (mid == nullptr) {
-                LOGE("Failed to find onNativeDataChannelOpen method for incoming DC");
-                env->DeleteLocalRef(cls);
-                return;
-            }
-            env->CallStaticVoidMethod(cls, mid);
-            LOGI("Called JniBridge.onNativeDataChannelOpen() for incoming DC");
-            env->DeleteLocalRef(cls);
-        });
-
-        this->dc->onClosed([this]() {
-            LOGI("DataChannel closed by remote");
-            isDataChannelOpen = false;
-            // Optionally notify Java
-            JNIEnv* env = getJNIEnv();
-            if (!env || !g_jniBridgeInstance) {
-                LOGE("JNIEnv or JniBridge instance is null in dc->onClosed (incoming), cannot notify Java");
-                return;
-            }
-            jclass cls = env->GetObjectClass(g_jniBridgeInstance);
-            jmethodID mid = env->GetStaticMethodID(cls, "onNativeDataChannelClose", "()V");
-            if (mid == nullptr) {
-                LOGE("Failed to find onNativeDataChannelClose method for incoming DC");
-                env->DeleteLocalRef(cls);
-                return;
-            }
-            env->CallStaticVoidMethod(cls, mid);
-            LOGI("Called JniBridge.onNativeDataChannelClose() for incoming DC");
-            env->DeleteLocalRef(cls);
-            });
-
-        this->dc->onMessage([this](auto data) {
-            if (std::holds_alternative<std::string>(data)) {
-                std::string message = std::get<std::string>(data);
-                LOGI("DataChannel message received from remote: %s", message.c_str());
-                // onDataChannelMessage(message); // Already handled by JNI callback below
-                JNIEnv* env = getJNIEnv();
-                if (!env || !g_jniBridgeInstance) {
-                    LOGE("JNIEnv or JniBridge instance is null in onMessage (incoming)");
-                    return;
-                }
-                jclass cls = env->GetObjectClass(g_jniBridgeInstance);
-                jmethodID mid = env->GetStaticMethodID(cls, "onDataChannelMessage", "(Ljava/lang/String;)V");
-                if (mid == nullptr) {
-                    LOGE("Failed to find onDataChannelMessage method for incoming DC");
-                    env->DeleteLocalRef(cls);
-                    return;
-                }
-                jstring messageStr = stringToJstring(env, message);
-                env->CallStaticVoidMethod(cls, mid, messageStr);
-                env->DeleteLocalRef(cls);
-                env->DeleteLocalRef(messageStr);
-            } else {
-                // LOGI("DataChannel binary message received (not handled by string path)");
-                // Binary data is handled by sendCodecConfigData and sendEncodedFrame
-            }
-        });
+    client->dc->onOpen([client]() {
+        LOGI("DataChannel from %s is opened", client->id.c_str());
     });
+
+    client->dc->onClosed([client]() {
+        LOGI("DataChannel from %s is closed", client->id.c_str());
+    });
+
+    client->dc->onMessage([client](auto data) {
+        if (std::holds_alternative<std::string>(data))
+            LOGI("Message from %s received: %s", client->id.c_str(), std::get<std::string>(data).c_str());
+        else
+         LOGI("Binary message from %s received, size=%zu", client->id.c_str(), std::get<rtc::binary>(data).size());
+    });
+
+    client->pc->setLocalDescription();
 }
 
 void WebRTCStreamer::sendingThreadLoop() {
@@ -335,43 +270,46 @@ void WebRTCStreamer::sendingThreadLoop() {
                 LOGI("Sending thread stopping: streaming inactive and queue empty.");
                 break;
             }
-            if (m_frameQueue.empty()) { // Spurious wakeup or stopping without frames
+            if (m_frameQueue.empty()) {
                 continue;
             }
 
-            frame = std::move(m_frameQueue.front()); // Use std::move
+            frame = std::move(m_frameQueue.front());
             m_frameQueue.pop();
-        } // Mutex is released here
+        }
 
-        if (track && track->isOpen()) {
-            try {
-                auto send_start_time = std::chrono::high_resolution_clock::now();
+        for (auto& client : clients) {
+            auto track = client.second->track;
+            if (track && track->isOpen()) {
+                try {
+                    auto send_start_time = std::chrono::high_resolution_clock::now();
 
-                track->sendFrame(frame.data, frame.frameInfo);
+                    track->sendFrame(frame.data, frame.frameInfo);
 
-                auto send_end_time = std::chrono::high_resolution_clock::now();
-                auto send_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(send_end_time - send_start_time).count();
+                    auto send_end_time = std::chrono::high_resolution_clock::now();
+                    auto send_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(send_end_time - send_start_time).count();
 
-                if (frame.isKeyFrame_log) {
-                    LOGD("Frame sent from queue. OrigSize: %d, SentSize: %zu, KeyFrame: %d, PTS: %lld, RTP TS: %lld, SendTime: %lld ms, Queue: %zu",
-                         frame.original_size_log, frame.data.size(), frame.isKeyFrame_log,
-                         frame.pts_log, frame.frameInfo.timestamp, send_duration_ms,
-                         m_frameQueue.size());
+                    if (frame.isKeyFrame_log) {
+                        LOGD("Frame sent from queue. OrigSize: %d, SentSize: %zu, KeyFrame: %d, PTS: %lld, RTP TS: %lld, SendTime: %lld ms, Queue: %zu",
+                             frame.original_size_log, frame.data.size(), frame.isKeyFrame_log,
+                             frame.pts_log, frame.frameInfo.timestamp, send_duration_ms,
+                             m_frameQueue.size());
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("Exception in sending thread while sending frame (SSRC %u): %s. Queue size: %zu",
+                         track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], e.what(), m_frameQueue.size());
+                } catch (...) {
+                    LOGE("Unknown exception in sending thread while sending frame (SSRC %u). Queue size: %zu",
+                         track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], m_frameQueue.size());
                 }
-            } catch (const std::exception& e) {
-                LOGE("Exception in sending thread while sending frame (SSRC %u): %s. Queue size: %zu",
-                     track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], e.what(), m_frameQueue.size());
-            } catch (...) {
-                LOGE("Unknown exception in sending thread while sending frame (SSRC %u). Queue size: %zu",
-                     track->description().getSSRCs().empty() ? 0 : track->description().getSSRCs()[0], m_frameQueue.size());
+            } else {
+                LOGW("Track is not open or null in sending thread, discarding frame. Frame PTS: %lld. Queue size: %zu", frame.pts_log, m_frameQueue.size());
             }
-        } else {
-            LOGW("Track is not open or null in sending thread, discarding frame. Frame PTS: %lld. Queue size: %zu", frame.pts_log, m_frameQueue.size());
-            // Consider clearing the queue if the track is permanently gone, or rely on stopStreaming.
         }
     }
+
     LOGI("Sending thread finished. Remaining queue size: %zu", m_frameQueue.size());
-    // Clear any remaining frames in the queue when thread exits
+
     std::lock_guard<std::mutex> lock(m_queueMutex);
     std::queue<QueuedFrame> empty;
     std::swap(m_frameQueue, empty);
@@ -381,20 +319,6 @@ void WebRTCStreamer::sendingThreadLoop() {
 
 void WebRTCStreamer::startStreaming() {
     LOGI("WebRTCStreamer::startStreaming");
-    if (!pc) {
-        LOGI("PeerConnection not initialized, calling init()");
-        init();
-    }
-    if (!pc) {
-        LOGE("PeerConnection still not initialized after init() in startStreaming. Cannot start.");
-        return;
-    }
-    if (!track) {
-        LOGE("Track not initialized in startStreaming. Cannot start sending thread.");
-        return;
-    }
-
-    // Start the sending thread if not already running
     if (!m_isStreamingActive || (m_sendingThread.joinable() && m_sendingThread.get_id() == std::thread::id())) {
         LOGI("Attempting to start sending thread.");
         m_isStreamingActive = true;
@@ -414,9 +338,6 @@ void WebRTCStreamer::startStreaming() {
     } else {
         LOGI("Sending thread already active or thread object valid.");
     }
-
-    LOGI("Setting local description (creating offer)");
-    pc->setLocalDescription();
 }
 
 void WebRTCStreamer::stopStreaming() {
@@ -445,64 +366,18 @@ void WebRTCStreamer::stopStreaming() {
     }
 
 
-    if (dc && dc->isOpen()) {
-        LOGI("Closing DataChannel");
-        dc->close();
-    }
-    if (pc && pc->state() != rtc::PeerConnection::State::Closed) {
-        LOGI("Closing PeerConnection");
-        pc->close();
-    }
-    // Release global reference if it was created for a specific instance
-    if (g_jniBridgeInstance) {
-        JNIEnv* env = getJNIEnv();
-        if (env) {
-            env->DeleteGlobalRef(g_jniBridgeInstance);
-            g_jniBridgeInstance = nullptr;
-        }
-    }
+    // release all clients
+    clients.clear();
 }
 
-void WebRTCStreamer::onDataChannelMessage(std::string message) {
-    // This is an internal C++ handler, already logged in dc->onMessage
-    // It can be used for C++ specific logic before or after notifying Java
-}
-
-void WebRTCStreamer::sendDataChannelMessage(std::string message) {
-    LOGI("WebRTCStreamer::sendDataChannelMessage: %s", message.c_str());
-    if (dc && dc->isOpen()) {
-        dc->send(message);
-        LOGI("Message sent via DataChannel");
-    } else {
-        if (dc && !dc->isOpen()) {
-            LOGE("DataChannel is closed. Cannot send message.");
-        } else {
-            LOGE("DataChannel is null. Cannot send message.");
-        }
-        LOGE("DataChannel is not open. Cannot send message.");
+void WebRTCStreamer::handleAnswer(const std::string& clientId, const std::string& sdp) {
+    LOGI("WebRTCStreamer::handleAnswer -> client: %s", clientId.c_str());
+    auto client = clients.find(clientId);
+    if (client == clients.end()) {
+        LOGE("Client not found in handleAnswer");
+        return;
     }
-}
-
-void WebRTCStreamer::handleOffer(const std::string& sdp) {
-    LOGI("WebRTCStreamer::handleOffer");
-//    if (!pc) {
-//        init();
-//    }
-//    const rtc::SSRC kVideoSSRC = 42;
-//    auto videoDesc = rtc::Description::Video();
-//    videoDesc.addSSRC(kVideoSSRC, "video-send");
-//    videoDesc.addH264Codec(96);
-//    track = pc->addTrack(videoDesc);
-//
-//
-//    rtc::Description offer(sdp, "offer");
-//    pc->setRemoteDescription(offer);
-//    pc->createAnswer();
-//    pc->setLocalDescription();
-}
-
-void WebRTCStreamer::handleAnswer(const std::string& sdp) {
-    LOGI("WebRTCStreamer::handleAnswer");
+    auto pc = client->second->pc;
     if (!pc) {
         LOGE("PeerConnection not initialized in handleAnswer");
         return;
@@ -512,16 +387,22 @@ void WebRTCStreamer::handleAnswer(const std::string& sdp) {
     pc->setRemoteDescription(answer);
 }
 
-void WebRTCStreamer::handleIceCandidate(const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp) {
-    LOGI("WebRTCStreamer::handleIceCandidate");
+void WebRTCStreamer::handleIceCandidate(const std::string& clientId, const std::string& sdpMid, int sdpMLineIndex, const std::string& sdp) {
+    LOGI("WebRTCStreamer::handleIceCandidate -> client: %s", clientId.c_str());
+    auto client = clients.find(clientId);
+    if (client == clients.end()) {
+        LOGE("Client not found in handleAnswer");
+        return;
+    }
+    auto pc = client->second->pc;
     if (!pc) {
         LOGE("PeerConnection not initialized in handleIceCandidate");
         return;
     }
     rtc::Candidate candidate(sdp, sdpMid);
-    // candidate.setSdpMLineIndex(sdpMLineIndex); // If libdatachannel supports this setter
     pc->addRemoteCandidate(candidate);
 }
+
 std::vector<std::byte> stored_codec_config_data;
 void WebRTCStreamer::sendCodecConfigData(const uint8_t* data, int size) {
     if (!data || size <= 0) {
@@ -540,24 +421,14 @@ void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFram
     }
 
     if (!m_isStreamingActive) {
-        // LOGW("Streaming is not active, frame not queued. Size: %d, PTS: %lld", size, pts); // Can be verbose
         return;
     }
 
-    if (!pc) {
-        LOGE("PeerConnection is null, cannot queue encoded frame. PTS: %lld", pts);
-        return;
-    }
-    // Track validity is checked by the sending thread before sending.
-    // If track is null from the start, m_isStreamingActive should ideally not be true,
-    // or startStreaming should prevent thread creation.
 
     rtc::binary sample_to_queue;
     const std::byte* frame_byte_data = reinterpret_cast<const std::byte*>(data);
 
-    // Prepend SPS/PPS if it's a keyframe and config data is available
     if (isKeyFrame && !stored_codec_config_data.empty()) {
-        // LOGD("Prepending SPS/PPS to keyframe for queue. SPS/PPS size: %zu, Frame data size: %d", stored_codec_config_data.size(), size);
         sample_to_queue.reserve(stored_codec_config_data.size() + size);
         sample_to_queue.insert(sample_to_queue.end(), stored_codec_config_data.begin(), stored_codec_config_data.end());
         sample_to_queue.insert(sample_to_queue.end(), frame_byte_data, frame_byte_data + size);
@@ -570,12 +441,10 @@ void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFram
         return;
     }
 
-    // Convert PTS from microseconds to RTP timestamp (typically 90kHz clock rate for video)
-    int64_t rtpTimestamp = (pts * 90000LL) / 1000000LL; // 90kHz clock
+    int64_t rtpTimestamp = (pts * 90000LL) / 1000000LL;
 
     rtc::FrameInfo frameInfo(rtpTimestamp);
-    frameInfo.payloadType = 96; // Ensure this matches the negotiated codec payload type (e.g., in SDP)
-    // frameInfo.ssrc = ...; // SSRC is usually handled by the RtpPacketizer bound to the track
+    frameInfo.payloadType = 96;
 
     QueuedFrame qFrame;
     qFrame.data = std::move(sample_to_queue);
@@ -589,29 +458,32 @@ void WebRTCStreamer::sendEncodedFrame(const char* data, int size, bool isKeyFram
         if (m_frameQueue.size() < MAX_FRAME_QUEUE_SIZE) {
             m_frameQueue.push(std::move(qFrame));
         } else {
-            // Simple strategy: drop oldest non-keyframe if possible, or current frame if queue is full of keyframes or if it's simpler.
-            // For now, just drop current if full. More sophisticated dropping (e.g. P-frames) can be added.
             LOGW("Frame queue is full (size: %zu / %d). Dropping current frame. PTS: %lld, isKeyFrame: %d",
                  m_frameQueue.size(), MAX_FRAME_QUEUE_SIZE, pts, isKeyFrame);
-            // To implement dropping oldest: m_frameQueue.pop(); m_frameQueue.push(std::move(qFrame));
-            // But be careful with keyframes.
-            return; // Return if dropped
+            return;
         }
     }
-    m_queueCondVar.notify_one(); // Notify the sending thread
+    m_queueCondVar.notify_one();
+}
 
-//    LOGD("Frame queued. OrigSize: %d, PTS: %lld. Queue depth: %zu", size, pts, m_frameQueue.size());
-    // Removed verbose logging of RTP timestamp and full data size here, as sending thread will log.
+void WebRTCStreamer::newConnection(const std::string &clientId) {
+    if (clients.find(clientId) != clients.end()) {
+        LOGE("Client with ID %s already exists.", clientId.c_str());
+        return;
+    }
+
+    std::shared_ptr<ClientContext> client = std::make_shared<ClientContext>(clientId);
+    clients[clientId] = client;
+    initConnection(client);
 }
 
 
-// JNI Bridge Implementations
 extern "C" {
 
 JNIEXPORT void JNICALL
 Java_io_bomtech_screenstreaming_JniBridge_nativeInit(JNIEnv *env, jclass clazz, jobject bridgeInstance) {
     LOGI("nativeInit called");
-    if (!g_jniBridgeInstance) { // Make bridgeInstance global if not already
+    if (!g_jniBridgeInstance) {
         g_jniBridgeInstance = env->NewGlobalRef(bridgeInstance);
         if (!g_jniBridgeInstance) {
             LOGE("Failed to create global reference for JniBridge instance");
@@ -621,8 +493,22 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeInit(JNIEnv *env, jclass clazz, 
     if (!g_webRTCStreamer) {
         g_webRTCStreamer = std::make_shared<WebRTCStreamer>();
     }
-//    g_webRTCStreamer->init();
 }
+
+JNIEXPORT void JNICALL
+Java_io_bomtech_screenstreaming_JniBridge_nativeDestroy(JNIEnv *env, jclass clazz) {
+    LOGI("nativeDestroy called");
+    if (g_jniBridgeInstance) {
+        env->DeleteGlobalRef(g_jniBridgeInstance);
+        g_jniBridgeInstance = nullptr;
+    }
+
+    if (g_webRTCStreamer) {
+        g_webRTCStreamer->stopStreaming();
+        g_webRTCStreamer.reset();
+    }
+}
+
 
 JNIEXPORT void JNICALL
 Java_io_bomtech_screenstreaming_JniBridge_nativeStartStreaming(JNIEnv *env, jclass clazz) {
@@ -646,42 +532,32 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeStopStreaming(JNIEnv *env, jclas
 }
 
 JNIEXPORT void JNICALL
-Java_io_bomtech_screenstreaming_JniBridge_nativeOnOfferReceived(JNIEnv *env, jclass clazz, jstring sdp) {
-    LOGI("nativeOnOfferReceived called");
+Java_io_bomtech_screenstreaming_JniBridge_nativeNewConnection(JNIEnv *env, jclass clazz, jstring clientId) {
+    LOGI("nativeNewConnection called");
     if (g_webRTCStreamer) {
-        g_webRTCStreamer->handleOffer(jstringToString(env, sdp));
+        g_webRTCStreamer->newConnection(jstringToString(env, clientId));
     } else {
-        LOGE("WebRTCStreamer not initialized in nativeOnOfferReceived");
+        LOGE("WebRTCStreamer not initialized in nativeStopStreaming");
     }
 }
 
 JNIEXPORT void JNICALL
-Java_io_bomtech_screenstreaming_JniBridge_nativeOnAnswerReceived(JNIEnv *env, jclass clazz, jstring sdp) {
+Java_io_bomtech_screenstreaming_JniBridge_nativeOnAnswerReceived(JNIEnv *env, jclass clazz, jstring clientId, jstring sdp) {
     LOGI("nativeOnAnswerReceived called");
     if (g_webRTCStreamer) {
-        g_webRTCStreamer->handleAnswer(jstringToString(env, sdp));
+        g_webRTCStreamer->handleAnswer(jstringToString(env, clientId), jstringToString(env, sdp));
     } else {
         LOGE("WebRTCStreamer not initialized in nativeOnAnswerReceived");
     }
 }
 
 JNIEXPORT void JNICALL
-Java_io_bomtech_screenstreaming_JniBridge_nativeOnIceCandidateReceived(JNIEnv *env, jclass clazz, jstring sdpMid, jint sdpMLineIndex, jstring sdp) {
+Java_io_bomtech_screenstreaming_JniBridge_nativeOnIceCandidateReceived(JNIEnv *env, jclass clazz, jstring clientId, jstring sdpMid, jint sdpMLineIndex, jstring sdp) {
     LOGI("nativeOnIceCandidateReceived called");
     if (g_webRTCStreamer) {
-        g_webRTCStreamer->handleIceCandidate(jstringToString(env, sdpMid), sdpMLineIndex, jstringToString(env, sdp));
+        g_webRTCStreamer->handleIceCandidate(jstringToString(env, clientId), jstringToString(env, sdpMid), sdpMLineIndex, jstringToString(env, sdp));
     } else {
         LOGE("WebRTCStreamer not initialized in nativeOnIceCandidateReceived");
-    }
-}
-
-JNIEXPORT void JNICALL
-Java_io_bomtech_screenstreaming_JniBridge_nativeSendData(JNIEnv *env, jclass clazz, jstring message) {
-    LOGI("nativeSendData called");
-    if (g_webRTCStreamer) {
-        g_webRTCStreamer->sendDataChannelMessage(jstringToString(env, message));
-    } else {
-        LOGE("WebRTCStreamer not initialized in nativeSendData");
     }
 }
 
@@ -705,12 +581,10 @@ JNIEXPORT void JNICALL
 Java_io_bomtech_screenstreaming_JniBridge_nativeSendEncodedFrame(
         JNIEnv *env, jclass clazz, jbyteArray dataArray, jint size, jboolean isKeyFrame, jlong presentationTimeUs) {
     if (!g_webRTCStreamer) {
-        // LOGE("WebRTCStreamer not initialized in nativeSendEncodedFrame"); // Can be verbose
         return;
     }
     jbyte* data = env->GetByteArrayElements(dataArray, nullptr);
     if (data == nullptr) {
-        // LOGE("Failed to get byte array elements from dataArray in nativeSendEncodedFrame"); // Can be verbose
         return;
     }
     g_webRTCStreamer->sendEncodedFrame(reinterpret_cast<const char*>(data), size, isKeyFrame, presentationTimeUs);

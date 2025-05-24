@@ -9,6 +9,8 @@ import android.util.Log;
 import android.widget.Button;
 import android.widget.Toast;
 
+import java.util.UUID;
+
 import io.bomtech.screenstreaming.databinding.ActivityMainBinding;
 
 public class MainActivity extends AppCompatActivity implements SignalingClient.SignalingListener {
@@ -18,7 +20,8 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     // Thay thế bằng địa chỉ IP của máy tính chạy Signaling Server
     // Nếu dùng emulator trên cùng máy: "ws://10.0.2.2:8080"
     // Nếu dùng thiết bị thật trong cùng mạng LAN: "ws://<IP_MAY_TINH_CUA_BAN>:8080"
-    private static final String SIGNALING_SERVER_URL = "ws://104.207.146.14:8080"; // Ensure this is correct//ws://127.0.0.1:8000/
+//    private static final String SIGNALING_SERVER_URL = "ws://104.207.146.14:8080"; // Ensure this is correct//ws://127.0.0.1:8000/
+    private static final String SIGNALING_SERVER_URL = "ws://192.168.1.108:8080"; // Ensure this is correct//ws://127.0.0.1:8000/
 
     private ActivityMainBinding binding;
     private SignalingClient signalingClient;
@@ -43,37 +46,12 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        JniBridge.nativeInit(new JniBridge());
-        signalingClient = new SignalingClient(SIGNALING_SERVER_URL, this);
-        JniBridge.setSignalingClient(signalingClient);
         JniBridge.setNativeCallback(nativeCallback);
 
-        Button startButton = binding.buttonStartStream;
-        Button stopButton = binding.buttonStopStream;
+        String androidId = UUID.randomUUID().toString();
+        signalingClient = new SignalingClient(SIGNALING_SERVER_URL + "/" + androidId, this);
+        JniBridge.setSignalingClient(signalingClient);
 
-        startButton.setOnClickListener(v -> {
-            if (!isStreaming && !isSignalingConnected) {
-                Log.d(TAG, "Start button clicked. Connecting to signaling server...");
-                Toast.makeText(this, "Connecting to signaling server...", Toast.LENGTH_SHORT).show();
-                signalingClient.connect();
-                // UI updates will happen in WebSocket callbacks or onOfferReceived
-            } else if (isSignalingConnected && !isStreaming) {
-                Toast.makeText(this, "Waiting for offer from web client...", Toast.LENGTH_SHORT).show();
-            } else if (isStreaming) {
-                Toast.makeText(this, "Already streaming", Toast.LENGTH_SHORT).show();
-            }
-        });
-
-        stopButton.setOnClickListener(v -> {
-            if (isStreaming) {
-                Log.d(TAG, "Stop button clicked. Stopping streaming...");
-                performStopStreaming();
-            } else {
-                Toast.makeText(this, "Not streaming", Toast.LENGTH_SHORT).show();
-            }
-        });
-
-        stopButton.setEnabled(false);
         startMediaProjectionRequest();
     }
 
@@ -84,8 +62,6 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
         }
         isStreaming = false;
         isSignalingConnected = false; // Reset signaling state
-        binding.buttonStartStream.setEnabled(true);
-        binding.buttonStopStream.setEnabled(false);
         Toast.makeText(this, "Streaming stopped", Toast.LENGTH_SHORT).show();
         Log.d(TAG, "Streaming stopped and resources released.");
     }
@@ -105,6 +81,8 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
             if (resultCode == RESULT_OK && data != null) {
                 Log.d(TAG, "Media projection permission GRANTED.");
                 startScreenCaptureService(resultCode, data);
+                JniBridge.nativeStartStreaming();
+                signalingClient.connect();
             } else {
                 Log.w(TAG, "Media projection permission DENIED.");
                 Toast.makeText(this, "Screen capture permission denied. Cannot start streaming.", Toast.LENGTH_LONG).show();
@@ -112,8 +90,6 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
                     signalingClient.disconnect(); 
                 }
                 isSignalingConnected = false;
-                binding.buttonStartStream.setEnabled(true); 
-                binding.buttonStopStream.setEnabled(false);
             }
         }
     }
@@ -148,32 +124,30 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     }
 
     @Override
-    public void onRequestReceived() {
-        Log.d(TAG, "Request received from signaling server.");
-        runOnUiThread(() -> JniBridge.nativeStartStreaming());
+    public void onRequestReceived(String clientId) {
+        runOnUiThread(() -> {
+            Toast.makeText(MainActivity.this, "New client connected: " + clientId, Toast.LENGTH_LONG).show();
+            JniBridge.nativeNewConnection(clientId);
+        });
     }
 
     @Override
-    public void onOfferReceived(String sdp) {
-        Log.d(TAG, "Offer received from signaling server: " + sdp.substring(0, Math.min(sdp.length(), 100)) + "..."); // Log snippet
-        runOnUiThread(() -> JniBridge.nativeOnOfferReceived(sdp));
+    public void onOfferReceived(String clientId, String sdp) { }
+
+    @Override
+    public void onAnswerReceived(String clientId, String sdp) {
+        runOnUiThread(() -> JniBridge.nativeOnAnswerReceived(clientId, sdp));
     }
 
     @Override
-    public void onAnswerReceived(String sdp) {
-
-        runOnUiThread(() -> JniBridge.nativeOnAnswerReceived(sdp));
-    }
-
-    @Override
-    public void onIceCandidateReceived(String sdpMid, int sdpMLineIndex, String sdp) {
+    public void onIceCandidateReceived(String clientId, String sdpMid, int sdpMLineIndex, String sdp) {
         Log.d(TAG, "ICE candidate received: mid=" + sdpMid + ", index=" + sdpMLineIndex + ", sdp=" + sdp);
-//        try {
-//            Thread.sleep(1000);
-//        } catch (InterruptedException e) {
-//            throw new RuntimeException(e);
-//        }
-        JniBridge.nativeOnIceCandidateReceived(sdpMid, sdpMLineIndex, sdp);
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        JniBridge.nativeOnIceCandidateReceived(clientId, sdpMid, sdpMLineIndex, sdp);
     }
 
     @Override
@@ -189,31 +163,11 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     public void onWebSocketClose() {
         Log.d(TAG, "WebSocket connection closed.");
         isSignalingConnected = false;
-        runOnUiThread(() -> {
-            Toast.makeText(MainActivity.this, "Disconnected from Signaling Server", Toast.LENGTH_SHORT).show();
-            if (isStreaming) { 
-                Log.d(TAG, "WebSocket closed during streaming. Stopping stream.");
-                performStopStreaming();
-            } else {
-                binding.buttonStartStream.setEnabled(true);
-                binding.buttonStopStream.setEnabled(false);
-            }
-        });
     }
 
     @Override
     public void onWebSocketError(Exception ex) {
         Log.e(TAG, "WebSocket error: " + ex.getMessage(), ex);
         isSignalingConnected = false;
-        runOnUiThread(() -> {
-            Toast.makeText(MainActivity.this, "Signaling error: " + ex.getMessage(), Toast.LENGTH_LONG).show();
-            if (isStreaming) {
-                Log.e(TAG, "WebSocket error during streaming. Stopping stream.");
-                performStopStreaming();
-            } else {
-                binding.buttonStartStream.setEnabled(true);
-                binding.buttonStopStream.setEnabled(false);
-            }
-        });
     }
 }

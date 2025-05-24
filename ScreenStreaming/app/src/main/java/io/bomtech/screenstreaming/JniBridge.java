@@ -4,19 +4,20 @@ import android.util.Log; // Thêm import này
 
 public class JniBridge {
 
-    private static final String TAG = "JniBridge"; // Thêm TAG cho logging
-    private static SignalingClient signalingClient; // Thêm tham chiếu đến SignalingClient
-    private static NativeCallback nativeCallback; // Thêm tham chiếu đến NativeCallback
-    private static volatile boolean isNativeDataChannelReady = false; // NEW: Flag for DC readiness
+    private static final String TAG = "JniBridge";
+    private static SignalingClient signalingClient;
+    private static NativeCallback nativeCallback;
+    private static volatile boolean isNativeDataChannelReady = false;
+    public static AccessibilityService accessibilityService;
 
-    // Load the native library
     static {
         System.loadLibrary("screenstreaming");
     }
 
     // Declare native methods
-    public static native void nativeInit(JniBridge bridgeInstance); // Thay đổi chữ ký
+    public static native void nativeInit(JniBridge ins);
     public static native void nativeDestroy();
+    public static native void nativeConfigScreen(int width, int height, int density, int modWidth, int modHeight);
     public static native void nativeStartStreaming();
     public static native void nativeStopStreaming();
     public static native void nativeNewConnection(String clientId);

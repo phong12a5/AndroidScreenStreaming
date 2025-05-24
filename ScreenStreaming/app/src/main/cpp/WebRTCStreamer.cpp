@@ -30,12 +30,10 @@
 
 #if defined(__ANDROID__)
 #include <pthread.h>
-#include <sys/resource.h> // For setpriority
-#include <unistd.h> // for gettid
+#include <sys/resource.h>
+#include <unistd.h>
 #endif
 
-
-// Define log tag for Android logging
 #define LOG_TAG "WebRTCStreamer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -109,7 +107,8 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_6;
 }
 
-WebRTCStreamer::WebRTCStreamer() {
+WebRTCStreamer::WebRTCStreamer(): m_sendingThread(nullptr),
+    jAccessibilityIns(nullptr) {
     LOGI("WebRTCStreamer constructor");
     clients.clear();
 }
@@ -239,8 +238,15 @@ void WebRTCStreamer::initConnection(std::shared_ptr<ClientContext> &client) {
     });
 
     client->dc->onMessage([client](auto data) {
-        if (std::holds_alternative<std::string>(data))
-            LOGI("Message from %s received: %s", client->id.c_str(), std::get<std::string>(data).c_str());
+        if (std::holds_alternative<std::string>(data)) {
+            LOGI("Message from %s received: %s", client->id.c_str(),
+                 std::get<std::string>(data).c_str());
+            json j = json::parse(std::get<std::string>(data));
+            auto type = j["type"].get<std::string>();
+            if (type == "mouse_event") {
+                handleMouseAnswer(client->id,j);
+            }
+        }
         else
          LOGI("Binary message from %s received, size=%zu", client->id.c_str(), std::get<rtc::binary>(data).size());
     });
@@ -477,6 +483,55 @@ void WebRTCStreamer::newConnection(const std::string &clientId) {
     initConnection(client);
 }
 
+void WebRTCStreamer::configScreen(int width, int height, int density, int modWidth, int modHeight) {
+    screenInfo.width = width;
+    screenInfo.height = height;
+    screenInfo.density = density;
+    screenInfo.modWidth = modWidth;
+    screenInfo.modHeight = modHeight;
+    screenInfo.scaleX = (float)width / (float)modWidth;
+    screenInfo.scaleY = (float)height / (float)modHeight;
+}
+
+void WebRTCStreamer::handelMouseEvent(std::shared_ptr<ClientContext> &client, json data) {
+    auto eventType = data["type"].get<std::string>();
+    if (eventType == "click") {
+        float x = data["x"].get<float>();
+        float y = data["y"].get<float>();
+        float realX, realY;
+        coordinateMousePoint(x, y, realX, realY);
+
+        // click event
+    }
+}
+
+void WebRTCStreamer::coordinateMousePoint(float x, float y, float &realX, float &realY) {
+    realX = x * screenInfo.scaleX;
+    realY = y * screenInfo.scaleY;
+}
+
+jobject WebRTCStreamer::getAccessibilityIns() {
+    JNIEnv* env = getJNIEnv();
+    if (!env || !g_jniBridgeInstance) {
+        LOGE("JNIEnv or JniBridge instance is null in onLocalDescription");
+        return nullptr;
+    }
+    jclass cls = env->GetObjectClass(g_jniBridgeInstance);
+    jfieldID field = env->GetStaticFieldID(cls, "accessibilityService", "Lio/bomtech/screenstreaming/AccessibilityService;");
+    jobject accessibilityService = env->GetStaticObjectField(cls, field);
+    env->DeleteLocalRef(cls);
+    return accessibilityService;
+}
+
+bool WebRTCStreamer::doClick(float x, float y) {
+    jobject accessibilityService = getAccessibilityIns();
+    if (!accessibilityService) {
+        return false;
+    }
+    JNIEnv* env = getJNIEnv();
+
+}
+
 
 extern "C" {
 
@@ -509,6 +564,16 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeDestroy(JNIEnv *env, jclass claz
     }
 }
 
+JNIEXPORT void JNICALL
+Java_io_bomtech_screenstreaming_JniBridge_nativeConfigScreen(JNIEnv *env, jclass clazz, jint width, jint height, jint density, jint modWidth, jint modHeight) {
+    LOGI("nativeConfigScreen called");
+    if (g_webRTCStreamer) {
+        g_webRTCStreamer->configScreen(width, height, density, modWidth, modHeight);
+    } else {
+        LOGE("WebRTCStreamer not initialized in nativeConfigScreen");
+    }
+}
+
 
 JNIEXPORT void JNICALL
 Java_io_bomtech_screenstreaming_JniBridge_nativeStartStreaming(JNIEnv *env, jclass clazz) {
@@ -525,7 +590,6 @@ Java_io_bomtech_screenstreaming_JniBridge_nativeStopStreaming(JNIEnv *env, jclas
     LOGI("nativeStopStreaming called");
     if (g_webRTCStreamer) {
         g_webRTCStreamer->stopStreaming();
-        // Consider when to release g_webRTCStreamer, e.g., on app exit or specific JNI call
     } else {
         LOGE("WebRTCStreamer not initialized in nativeStopStreaming");
     }

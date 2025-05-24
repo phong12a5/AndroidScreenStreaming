@@ -25,9 +25,17 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         native-lib.cpp
         WebRTCStreamer.cpp) # Add WebRTCStreamer.cpp
 
+# Add libdatachannel's public include directory to your project's include paths
+# This helps ensure that headers exposed by libdatachannel, including nlohmann_json if structured accordingly,
+# are found by your project.
+target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/libdatachannel/include
+)
+
 target_link_libraries(${CMAKE_PROJECT_NAME}
         android
         log
         OpenSSL::Crypto
         OpenSSL::SSL
+        nlohmann_json::nlohmann_json
         datachannel-static)

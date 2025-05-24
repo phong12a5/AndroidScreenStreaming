@@ -1,12 +1,19 @@
 package io.bomtech.screenstreaming;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+
+import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.Toast;
 
 import java.util.UUID;
@@ -26,7 +33,9 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     private ActivityMainBinding binding;
     private SignalingClient signalingClient;
     private boolean isStreaming = false;
-    private boolean isSignalingConnected = false; // To track WebSocket connection state
+    private boolean isSignalingConnected = false;
+    AlertDialog acspDialog = null;
+    AlertDialog.Builder acspDialogBuilder = null;
     private JniBridge.NativeCallback nativeCallback = new JniBridge.NativeCallback() {
         @Override
         public void onNativeDataChannelClose() {
@@ -46,13 +55,33 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
+        Button startButton = binding.buttonStartStream;
+
+        startButton.setOnClickListener(v -> {
+            // check running service
+            if (!isStreaming) {
+                startButton.setText("Stop Stream");
+                startMediaProjectionRequest();
+                isStreaming = true;
+            } else {
+                startButton.setText("Start Stream");
+                performStopStreaming();
+            }
+        });
+
         JniBridge.setNativeCallback(nativeCallback);
 
         String androidId = UUID.randomUUID().toString();
         signalingClient = new SignalingClient(SIGNALING_SERVER_URL + "/" + androidId, this);
         JniBridge.setSignalingClient(signalingClient);
+    }
 
-        startMediaProjectionRequest();
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!isAccessibilitySettingsOn(this)) {
+            startAccessibilityPermissionDialog();
+        }
     }
 
     private void performStopStreaming() {
@@ -108,6 +137,32 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
         Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
         stopService(serviceIntent);
         Log.d(TAG, "ScreenCaptureService stopped");
+    }
+
+    private void startAccessibilityPermissionDialog() {
+        final ImageView image = new ImageView(this);
+        if (acspDialogBuilder == null) {
+            acspDialogBuilder = new AlertDialog.Builder(this);
+            acspDialogBuilder.setView(image);
+            acspDialogBuilder.setMessage("On the next screen select " + this.getResources().getString(R.string.app_name) + ", turn on the toggle, and then press OK.");
+            acspDialogBuilder.setPositiveButton("next", new DialogInterface.OnClickListener() {
+                public void onClick(DialogInterface dialog, int id) {
+                    Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                    intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                    startActivity(intent);
+                }
+            });
+
+            acspDialogBuilder.setOnCancelListener(new DialogInterface.OnCancelListener() {
+                @Override
+                public void onCancel(DialogInterface dialog) {
+                    startAccessibilityPermissionDialog();
+                }
+            });
+            acspDialog = acspDialogBuilder.create();
+        }
+        if (!acspDialog.isShowing())
+            acspDialog.show();
     }
 
     @Override
@@ -169,5 +224,42 @@ public class MainActivity extends AppCompatActivity implements SignalingClient.S
     public void onWebSocketError(Exception ex) {
         Log.e(TAG, "WebSocket error: " + ex.getMessage(), ex);
         isSignalingConnected = false;
+    }
+
+    static public boolean isAccessibilitySettingsOn(Context mContext) {
+        int accessibilityEnabled = 0;
+        final String service = mContext.getPackageName() + "/" + AccessibilityService.class.getCanonicalName();
+        try {
+            accessibilityEnabled = Settings.Secure.getInt(
+                    mContext.getApplicationContext().getContentResolver(),
+                    android.provider.Settings.Secure.ACCESSIBILITY_ENABLED);
+            Log.d(TAG, "accessibilityEnabled = " + accessibilityEnabled);
+        } catch (Settings.SettingNotFoundException e) {
+            Log.e(TAG, "Error finding setting, default accessibility to not found: "
+                    + e.getMessage());
+        }
+        TextUtils.SimpleStringSplitter mStringColonSplitter = new TextUtils.SimpleStringSplitter(':');
+
+        if (accessibilityEnabled == 1) {
+            Log.d(TAG, "***ACCESSIBILITY IS ENABLED*** -----------------");
+            String settingValue = Settings.Secure.getString(
+                    mContext.getApplicationContext().getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (settingValue != null) {
+                mStringColonSplitter.setString(settingValue);
+                while (mStringColonSplitter.hasNext()) {
+                    String accessibilityService = mStringColonSplitter.next();
+
+                    Log.d(TAG, "-------------- > accessibilityService :: " + accessibilityService + " " + service);
+                    if (accessibilityService.equalsIgnoreCase(service)) {
+                        Log.d(TAG, "We've found the correct setting - accessibility is switched on!");
+                        return true;
+                    }
+                }
+            }
+        } else {
+            Log.d(TAG, "***ACCESSIBILITY IS DISABLED***");
+        }
+        return false;
     }
 }

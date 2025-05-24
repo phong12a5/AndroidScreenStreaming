@@ -14,9 +14,9 @@
             margin-bottom: 20px;
         }
         #remoteVideo { /* Chỉ hiển thị remote */
-            width: 90%; /* Chiếm gần hết chiều rộng */
+            width: auto; /* Changed from 100% to auto */
+            height: auto;
             max-width: 800px; /* Giới hạn kích thước tối đa */
-            border: 1px solid #ccc;
             background-color: #000;
         }
         .controls {
@@ -77,6 +77,7 @@
         let webSocket;
 
         let peerConnection; // Peer connection sẽ được tạo khi nhận Offer
+        let dc; // Variable to store the RTCDataChannel instance
 
 
         // Cấu hình STUN server
@@ -167,12 +168,23 @@
             };
         }
 
-        function sendMessage(message) {
+        function sendMessage(message) { // This is for WebSocket signaling
             if (webSocket && webSocket.readyState === WebSocket.OPEN) {
                 webSocket.send(JSON.stringify(message));
                  console.log('WebSocket message sent:', message);
             } else {
                 console.warn('WebSocket not connected. Message not sent:', message);
+            }
+        }
+
+        // NEW: Function to send messages over the WebRTC DataChannel
+        function sendDataChannelMessage(payload) {
+            if (dc && dc.readyState === 'open') {
+                const messageString = JSON.stringify(payload);
+                dc.send(messageString);
+                console.log('DataChannel message sent:', payload);
+            } else {
+                console.warn('DataChannel not open or not initialized. Message not sent:', payload);
             }
         }
 
@@ -183,6 +195,34 @@
 
         // Kết nối WebSocket ngay khi trang tải
         connectWebSocket();
+
+        // NEW: Event listener for clicks on the remote video
+        remoteVideo.addEventListener('click', (event) => {
+            if (!peerConnection || !dc || dc.readyState !== 'open') {
+                console.warn('Cannot send mouse click: PeerConnection or DataChannel not ready.');
+                return;
+            }
+
+            const rect = remoteVideo.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+
+            // Get the video's intrinsic dimensions if available, otherwise use display dimensions
+            const videoContentWidth = remoteVideo.videoWidth || rect.width;
+            const videoContentHeight = remoteVideo.videoHeight || rect.height;
+
+            const clickData = {
+                type: 'mouse_event', // Changed to generic mouse_event
+                eventType: 'click', 
+                x: x,
+                y: y,
+                videoWidth: videoContentWidth, // Actual width of the video content
+                videoHeight: videoContentHeight, // Actual height of the video content
+                displayWidth: rect.width, // Displayed width of the video element
+                displayHeight: rect.height // Displayed height of the video element
+            };
+            sendDataChannelMessage(clickData);
+        });
 
 
         // --- Functions ---
@@ -195,6 +235,13 @@
              }
             console.log('Creating peer connection...');
             peerConnection = new RTCPeerConnection(configuration);
+
+            // Handling incoming data channel from the remote peer (sender/streamer)
+            peerConnection.ondatachannel = (event) => {
+                console.log('DataChannel received from remote:', event.channel.label);
+                dc = event.channel;
+                setupDataChannelEvents(dc);
+            };
 
             // Xử lý khi nhận được track từ remote peer
             peerConnection.ontrack = (event) => {
@@ -303,6 +350,29 @@
             // hangupButton.disabled = false; // Kích hoạt nút hangup khi PC được tạo (hoặc khi nhận offer)
 
             return peerConnection;
+        }
+
+        // NEW: Helper function to set up DataChannel event handlers
+        function setupDataChannelEvents(channel) {
+            channel.onopen = () => {
+                console.log(`DataChannel '${channel.label}' opened.`);
+                // You can enable UI elements that require the data channel here
+            };
+
+            channel.onclose = () => {
+                console.log(`DataChannel '${channel.label}' closed.`);
+            };
+
+            channel.onmessage = (event) => {
+                console.log(`DataChannel message received from '${channel.label}':`, event.data);
+                // Handle incoming messages from the data channel if needed
+                // const message = JSON.parse(event.data);
+                // if (message.type === 'some_type') { ... }
+            };
+
+            channel.onerror = (error) => {
+                console.error(`DataChannel '${channel.label}' error:`, error);
+            };
         }
 
         // Hàm để gửi tin nhắn 'request' đến signaling server

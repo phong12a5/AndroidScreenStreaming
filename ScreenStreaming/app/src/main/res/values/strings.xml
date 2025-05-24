@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ScreenStreaming</string>
+    <string name="accessibility_service_summary">Screen cast supports</string>
 </resources>

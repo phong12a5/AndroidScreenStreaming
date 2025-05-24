@@ -44,16 +44,12 @@ public class ScreenCaptureService extends Service {
     private int videoHeight;
     private static final int VIDEO_MAX_WIDTH = 320;
     private static final int VIDEO_MAX_HEIGHT = 640;
-    private static final int VIDEO_BITRATE = 512 * 1024; // 1 Mbps
-    private static final int VIDEO_FRAME_RATE = 15; // 30 FPS
-    private static final int VIDEO_I_FRAME_INTERVAL = 10; // 1 second, key frame interval
-
+    private static final int VIDEO_BITRATE = 512 * 1024;
+    private static final int VIDEO_FRAME_RATE = 15;
+    private static final int VIDEO_I_FRAME_INTERVAL = 10;
     private MediaProjectionManager mediaProjectionManager;
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
-    // private ImageReader imageReader; // Removed
-    // private HandlerThread imageReaderThread; // Removed
-    // private Handler imageReaderHandler; // Removed
 
     private MediaCodec videoEncoder;
     private Surface inputSurface;
@@ -100,6 +96,7 @@ public class ScreenCaptureService extends Service {
         if (videoWidth % 2 != 0) videoWidth--;
         if (videoHeight % 2 != 0) videoHeight--;
 
+        JniBridge.nativeConfigScreen(screenWidth, screenHeight, screenDensity, videoWidth, videoHeight);
 
         Log.d(TAG, "Screen dimensions: " + screenWidth + "x" + screenHeight + " Density: " + screenDensity);
         Log.d(TAG, "Video encoding dimensions: " + videoWidth + "x" + videoHeight);

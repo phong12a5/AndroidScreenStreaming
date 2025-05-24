@@ -42,8 +42,8 @@ public class ScreenCaptureService extends Service {
     private static final String VIDEO_MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC; // H.264
     private int videoWidth;
     private int videoHeight;
-    private static final int VIDEO_BITRATE = 2 * 1024 * 1024; // 2 Mbps
-    private static final int VIDEO_FRAME_RATE = 20; // 30 FPS
+    private static final int VIDEO_BITRATE = 512 * 1024; // 2 Mbps
+    private static final int VIDEO_FRAME_RATE = 15; // 30 FPS
     private static final int VIDEO_I_FRAME_INTERVAL = 1; // 1 second, key frame interval
 
     private MediaProjectionManager mediaProjectionManager;

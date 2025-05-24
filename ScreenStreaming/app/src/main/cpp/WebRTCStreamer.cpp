@@ -113,7 +113,7 @@ void WebRTCStreamer::init() {
     // Example: config.iceServers.emplace_back("stun:stun.l.google.com:19302");
     // Add your STUN/TURN servers here if needed for NAT traversal
     config.iceServers.emplace_back("stun:stun.l.google.com:19302");
-
+    config.iceServers.emplace_back(rtc::IceServer("turn:149.28.142.115:3478", 3478, "admin", "Pdt1794@")); // Added TURN server
 
     pc = std::make_shared<rtc::PeerConnection>(config);
 

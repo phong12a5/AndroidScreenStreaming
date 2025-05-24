@@ -72,7 +72,7 @@
         const hangupButton = document.getElementById('hangupButton');
         const signalingStatusSpan = document.getElementById('signalingStatus');
 
-        const signalingServerUrl = 'ws://localhost:8080'; // Địa chỉ signaling server
+        const signalingServerUrl = 'ws://104.207.146.14:8080'; // Địa chỉ signaling server
         let webSocket;
 
         let peerConnection; // Peer connection sẽ được tạo khi nhận Offer
@@ -81,8 +81,9 @@
         // Cấu hình STUN server
         const configuration = {
             iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' }
+                { urls: 'stun:stun.l.google.com:19302' },
                 // Bạn có thể thêm các STUN/TURN server khác ở đây
+                { urls: 'turn:149.28.142.115:3478', username: 'admin', credential: 'Pdt1794@' }
             ]
         };
 
